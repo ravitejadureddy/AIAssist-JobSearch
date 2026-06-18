@@ -406,9 +406,13 @@ for (const file of tsvFiles) {
       skipped++;
     }
   } else {
-    // New entry — use the number from the TSV
-    const entryNum = addition.num > maxNum ? addition.num : ++maxNum;
-    if (addition.num > maxNum) maxNum = addition.num;
+    // New entry — prefer the report number extracted from the report link column
+    // (batch workers write the report filename; it's more reliable than the TSV num column
+    // which Haiku workers sometimes get wrong). Fall back to TSV num, then maxNum+1.
+    const reportNumFromLink = extractReportNum(addition.report);
+    const preferredNum = (reportNumFromLink && reportNumFromLink > 0) ? reportNumFromLink : addition.num;
+    const entryNum = preferredNum > maxNum ? preferredNum : ++maxNum;
+    if (entryNum > maxNum) maxNum = entryNum;
 
     const newLine = `| ${entryNum} | ${addition.date} | ${addition.company} | ${addition.role} | ${addition.score} | ${addition.status} | ${addition.pdf} | ${addition.report} | ${addition.notes} |`;
     newLines.push(newLine);

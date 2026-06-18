@@ -42,6 +42,41 @@ bun.lock
 
 # Claude Code local
 .claude/settings.local.json
+.claude/settings.json
 .claude/memory/
 career-dashboard
 package-lock.json
+
+# Personal browser & session data (NEVER commit)
+data/linkedin-session.json
+data/chrome-profile/
+data/apply-screenshots/
+data/apply-status/
+data/application_answers.json
+data/h1b-cache.tsv
+data/inbox.md
+data/pipeline-export.csv
+data/applications.md.bak
+
+# Personal resume files
+Resume/
+Resume_Exp_Points/
+Operating Role/
+
+# Batch personal data
+batch/gate1-results.tsv
+batch/phase1-prompt.md
+batch/pipeline-rows/
+batch/errors/
+batch/error-*.json
+
+# Logs
+logs/
+
+# Reports (PDFs are generated output, not source)
+reports/*.pdf
+
+# IDE
+.idea/
+*.swp
+*.swo

@@ -60,8 +60,9 @@ Aplicación durante la evaluación A-G:
 ### Paso 1 — Obtener JD
 
 1. Lee el archivo JD en `{{JD_FILE}}`
-2. Si el archivo está vacío o no existe, intenta obtener el JD desde `{{URL}}` con WebFetch
-3. Si ambos fallan, reporta error y termina
+2. Si el archivo existe y su primera línea empieza con `RESOLVED_APPLY_URL:`, extrae esa URL y úsala como la URL real de la oferta en lugar de `{{URL}}` para el resto del proceso y para el campo `**URL:**` del reporte. El JD real comienza después de esa línea.
+3. Si el archivo está vacío o no existe, intenta obtener el JD desde `{{URL}}` con WebFetch
+4. Si ambos fallan, reporta error y termina
 
 ### Paso 2 — Evaluación A-G
 
@@ -309,14 +310,15 @@ next_action: "{one concrete next step}"
 12. Escribe HTML a `/tmp/cv-candidate-{company-slug}.html`
 13. Ejecuta:
 ```bash
+mkdir -p output/{report_num}-{company-slug}
 node generate-pdf.mjs \
   /tmp/cv-candidate-{company-slug}.html \
-  output/cv-candidate-{company-slug}-{{DATE}}.pdf \
+  output/{report_num}-{company-slug}/resume.pdf \
   --format={letter|a4}
 ```
 14. Reporta: ruta PDF, nº páginas, % cobertura keywords
 
-On success, in Paso 5 use `pdf_emoji` = `✅` and in Paso 6 set `"pdf"` to the output path.
+On success, in Paso 5 use `pdf_emoji` = `✅` and in Paso 6 set `"pdf"` to `output/{report_num}-{company-slug}/resume.pdf`.
 
 **Reglas ATS:**
 - Single-column (sin sidebars)
@@ -393,9 +395,30 @@ Formato TSV (una sola línea, sin header, 9 columnas tab-separated):
 | 6 | score | X.XX/5 | `4.55/5` | O `N/A` si no evaluable |
 | 7 | pdf | emoji | `✅` o `❌` | Si se generó PDF |
 | 8 | report | md link | `[647](reports/647-...)` | Link root-relative; merge-tracker.mjs lo normaliza relativo al tracker (ej. `../reports/...`, #760) |
-| 9 | notes | string | `APPLY HIGH...` | Resumen 1 frase |
+| 9 | notes | string | `APPLY HIGH... Recommended CV: Resume/healthcare/resume.pdf` | Resumen 1 frase + CV path |
 
 **IMPORTANTE:** El orden TSV tiene status ANTES de score (col 5→status, col 6→score). En applications.md el orden es inverso (col 5→score, col 6→status). merge-tracker.mjs maneja la conversión.
+
+**REGLA — Structured tags in notes (dashboard parses these):** El campo notes DEBE incluir siempre estas etiquetas en formato parseable:
+
+1. **H1B tag** (una de las siguientes):
+   - `H-1B confirmed (N LCAs)` — LCA count conocido y ≥ 50
+   - `H-1B likely (N LCAs)` — LCA count 10–49
+   - `H-1B low (N LCAs)` — LCA count < 10
+   - `H-1B friendly` — JD indica sponsorship pero sin LCA count
+   - `No H-1B` — JD excluye sponsorship explícitamente
+   - `H-1B unverified` — estado de sponsorship desconocido
+
+2. **Comp tag** (una de las siguientes):
+   - `$XK–$YK` — rango salarial (ej. `$160K–$190K`)
+   - `$X/hr` — tarifa por hora
+   - `Comp unlisted` — sin info salarial disponible
+
+**REGLA — Recommended CV:** Siempre terminar el campo notes con ` Recommended CV: Resume/{folder}/resume.pdf` usando esta lógica:
+- `healthcare` → empresa de healthcare, biotech, pharma, health insurance, digital health, clinical data
+- `analytics-engineer` → título del rol contiene "Analytics Engineer" o "BI Engineer"
+- `fintech` → empresa de banca, servicios financieros, seguros, pagos, inversiones
+- `generic` → todo lo demás (default)
 
 **Estados canónicos válidos:** `Evaluada`, `Aplicado`, `Respondido`, `Entrevista`, `Oferta`, `Rechazado`, `Descartado`, `NO APLICAR`
 

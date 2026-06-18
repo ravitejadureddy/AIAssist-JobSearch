@@ -18,8 +18,13 @@
 12. Generate full HTML from template + personalized content
 13. Read `name` from `config/profile.yml` → normalize to kebab-case lowercase (e.g. "John Doe" → "john-doe") → `{candidate}`
 14. Write HTML to `/tmp/cv-{candidate}-{company}.html`
-15. Execute: `node generate-pdf.mjs /tmp/cv-{candidate}-{company}.html output/cv-{candidate}-{company}-{YYYY-MM-DD}.pdf --format={letter|a4}`
-16. Report: PDF path, number of pages, keyword coverage %
+15. Determine output folder and path:
+    - If `report_num` is already known from the current session (e.g. from a prior evaluation step) → use `{report_num}-{slug}`
+    - Else grep `data/applications.md` for this company+role, extract the report link number → use that as `{report_num}`
+    - Fallback (no tracker entry): use `pdf-{slug}-{YYYY-MM-DD}` as the folder name
+    - `mkdir -p output/{report_num}-{slug}`
+    - `node generate-pdf.mjs /tmp/cv-{candidate}-{company}.html output/{report_num}-{slug}/resume.pdf --format={letter|a4}`
+16. Report: `output/{report_num}-{slug}/resume.pdf`, number of pages, keyword coverage %
 
 ## ATS Rules (clean parsing)
 
@@ -155,17 +160,18 @@ f. `commit-editing-transaction` to save (ONLY after user approval)
 #### Step 5 — Export and download PDF
 
 a. `export-design` the duplicate as PDF (format: a4 or letter based on JD location)
-b. **IMMEDIATELY** download the PDF using Bash:
+b. **IMMEDIATELY** download the PDF using Bash (same `{report_num}-{slug}` folder from Step 15):
    ```bash
-   curl -sL -o "output/cv-{candidate}-{company}-canva-{YYYY-MM-DD}.pdf" "{download_url}"
+   mkdir -p output/{report_num}-{slug}
+   curl -sL -o "output/{report_num}-{slug}/resume.pdf" "{download_url}"
    ```
    The export URL is a pre-signed S3 link that expires in ~2 hours. Download it right away.
 c. Verify the download:
    ```bash
-   file output/cv-{candidate}-{company}-canva-{YYYY-MM-DD}.pdf
+   file output/{report_num}-{slug}/resume.pdf
    ```
    Must show "PDF document". If it shows XML or HTML, the URL expired — re-export and retry.
-d. Report: PDF path, file size, Canva design URL (for manual tweaking)
+d. Report: `output/{report_num}-{slug}/resume.pdf`, file size, Canva design URL (for manual tweaking)
 
 #### Error handling
 

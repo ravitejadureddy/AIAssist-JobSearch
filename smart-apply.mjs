@@ -1,0 +1,1243 @@
+#!/usr/bin/env node
+/**
+ * smart-apply.mjs — Playwright-based application auto-fill assistant.
+ *
+ * Fills Greenhouse / Lever / Ashby application forms deterministically from
+ * config/profile.yml, data/application_answers.json, and the job's Recommended CV.
+ *
+ * Work auth answers (US authorized = Yes, requires H-1B = Yes) are hardcoded
+ * and NEVER delegated to LLM.
+ *
+ * Stops at the final review page — NEVER auto-submits.
+ *
+ * Usage:
+ *   node smart-apply.mjs --num 123
+ *   node smart-apply.mjs --url https://boards.greenhouse.io/company/jobs/12345
+ *   node smart-apply.mjs --num 123 --headless     (background mode, screenshot only)
+ *
+ * Status written to: data/apply-status/{num}.json
+ * Screenshots saved to: data/apply-screenshots/{num}-{timestamp}.png
+ */
+
+import { chromium } from 'playwright';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { join, resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
+const isMain = resolve(process.argv[1] || '') === fileURLToPath(import.meta.url);
+
+// ─── Status constants (dashboard display only — NOT in states.yml) ────────────
+export const APPLY_STATUS = {
+  RUNNING:              'RUNNING',
+  FILLED_PENDING_REVIEW:'FILLED_PENDING_REVIEW',
+  NEEDS_ANSWER:         'NEEDS_ANSWER',
+  BLOCKED:              'BLOCKED',
+  DUPLICATE:            'DUPLICATE',
+  NEEDS_MANUAL:         'NEEDS_MANUAL',
+  ERROR:                'ERROR',
+};
+
+// ─── CLI args ─────────────────────────────────────────────────────────────────
+const args = process.argv.slice(2);
+function getArg(flag) {
+  const i = args.indexOf(flag);
+  return i !== -1 ? args[i + 1] : null;
+}
+const numArg    = getArg('--num');
+const urlArg    = getArg('--url');
+const headless  = args.includes('--headless');
+
+if (isMain && !numArg && !urlArg) {
+  console.error('Usage: node smart-apply.mjs --num <num> | --url <url>');
+  process.exit(1);
+}
+
+// ─── Status helpers ───────────────────────────────────────────────────────────
+function statusDir()  { return join(CAREER_OPS, 'data', 'apply-status'); }
+function ssDir()      { return join(CAREER_OPS, 'data', 'apply-screenshots'); }
+
+function writeStatus(num, status, extra = {}) {
+  mkdirSync(statusDir(), { recursive: true });
+  const path = join(statusDir(), `${num}.json`);
+  writeFileSync(path, JSON.stringify({ num, status, updatedAt: new Date().toISOString(), ...extra }, null, 2));
+}
+
+function readStatus(num) {
+  const path = join(statusDir(), `${num}.json`);
+  if (!existsSync(path)) return null;
+  try { return JSON.parse(readFileSync(path, 'utf-8')); } catch { return null; }
+}
+
+// ─── Tracker lookup ───────────────────────────────────────────────────────────
+function lookupJob(num) {
+  const path = join(CAREER_OPS, 'data', 'applications.md');
+  if (!existsSync(path)) return null;
+  const lines = readFileSync(path, 'utf-8').split('\n');
+  for (const line of lines) {
+    if (!line.startsWith('|')) continue;
+    const cols = line.split('|').slice(1, -1).map(s => s.trim());
+    if (cols.length < 8) continue;
+    const [rowNum, date, company, role, score, status, pdf, report, ...noteParts] = cols;
+    if (parseInt(rowNum) !== parseInt(num)) continue;
+    const notes = noteParts.join(' | ').trim();
+    const cvMatch = notes.match(/Recommended CV:\s*(Resume\/[^\s|]+\.pdf)/i);
+    const reportMatch = report.match(/\(([^)]+\.md)\)/);
+    return { num: parseInt(rowNum), date, company, role, score, status, notes,
+             recommendedCv: cvMatch ? cvMatch[1] : null,
+             reportPath: reportMatch ? reportMatch[1] : null };
+  }
+  return null;
+}
+
+// ─── Extract job URL from report file ────────────────────────────────────────
+function extractUrlFromReport(reportPath) {
+  if (!reportPath) return null;
+  const normalized = reportPath.replace(/^(\.\.\/)+/, '');
+  const full = resolve(join(CAREER_OPS, normalized));
+  if (!existsSync(full)) return null;
+  try {
+    const text = readFileSync(full, 'utf-8');
+    const m = text.match(/\*\*URL:\*\*\s*(https?:\/\/[^\s\n]+)/i);
+    return m ? m[1].trim() : null;
+  } catch { return null; }
+}
+
+// ─── ATS detection ────────────────────────────────────────────────────────────
+function detectATS(url) {
+  if (!url) return 'unknown';
+  if (/greenhouse\.io/i.test(url))                                  return 'greenhouse';
+  if (/lever\.co/i.test(url))                                       return 'lever';
+  if (/ashbyhq\.com/i.test(url) || /ashby\.com/i.test(url))        return 'ashby';
+  if (/workday\.com/i.test(url) || /myworkdayjobs\.com/i.test(url)) return 'workday';
+  if (/icims\.com/i.test(url))                                      return 'icims';
+  if (/taleo\.net/i.test(url))                                      return 'taleo';
+  if (/bamboohr\.com/i.test(url))                                   return 'bamboohr';
+  if (/smartrecruiters\.com/i.test(url))                            return 'smartrecruiters';
+  if (/jobvite\.com/i.test(url))                                    return 'jobvite';
+  if (/linkedin\.com\/jobs/i.test(url))                             return 'linkedin';
+  if (/rippling\.com/i.test(url))                                   return 'rippling';
+  if (/dover\.com/i.test(url))                                      return 'dover';
+  return 'unknown';
+}
+
+// ─── Answer matching ──────────────────────────────────────────────────────────
+function loadAnswers() {
+  const path = join(CAREER_OPS, 'data', 'application_answers.json');
+  if (!existsSync(path)) throw new Error('data/application_answers.json not found');
+  return JSON.parse(readFileSync(path, 'utf-8'));
+}
+
+function matchAnswer(label, answersData) {
+  const labelLower = label.toLowerCase().replace(/[*:?]/g, '').trim();
+  for (const ans of answersData.answers) {
+    for (const pat of ans.patterns) {
+      if (labelLower.includes(pat.toLowerCase())) return ans;
+    }
+  }
+  return null;
+}
+
+// ─── Work auth detection ──────────────────────────────────────────────────────
+function isWorkAuthLabel(label) {
+  const l = label.toLowerCase();
+  return l.includes('authorized to work') || l.includes('work authorization') ||
+         l.includes('sponsorship') || l.includes('require visa') ||
+         l.includes('visa sponsorship') || l.includes('us citizen') ||
+         l.includes('work in the us') || l.includes('work in the united states') ||
+         l.includes('eligible to work') || l.includes('h-1b') || l.includes('h1b') ||
+         l.includes('immigration') || l.includes('legal right') ||
+         l.includes('permit to work');
+}
+
+function workAuthAnswer(label, answersData) {
+  const l = label.toLowerCase();
+  const auth = answersData.work_auth;
+
+  // "authorized to work in the US?" → Yes
+  if (l.includes('authorized') && !l.includes('sponsor')) return auth.authorized_to_work_us_text;
+  // "will you require sponsorship?" → Yes
+  if (l.includes('sponsorship') || l.includes('sponsor') || l.includes('require visa') ||
+      l.includes('h-1b') || l.includes('h1b') || l.includes('immigration')) {
+    return auth.requires_sponsorship_text;
+  }
+  // "citizen or GC?" → No
+  if (l.includes('citizen') || l.includes('green card') || l.includes('permanent resident')) {
+    return auth.citizen_or_gc_text;
+  }
+  // "work permit" or generic work auth
+  if (l.includes('eligible to work') || l.includes('legal right')) return auth.authorized_to_work_us_text;
+  return null;
+}
+
+// ─── CV parser ────────────────────────────────────────────────────────────────
+function parseCV() {
+  const cvPath = join(CAREER_OPS, 'cv.md');
+  if (!existsSync(cvPath)) return { experience: [], education: [] };
+  const text = readFileSync(cvPath, 'utf-8');
+
+  const expSection = text.match(/^# PROFESSIONAL EXPERIENCE\s*([\s\S]*?)(?=^# )/m)?.[1] || '';
+  const eduSection = text.match(/^# EDUCATION\s*([\s\S]*?)(?=^# |$)/m)?.[1] || '';
+
+  const experience = [];
+  for (const block of expSection.split(/^## /m).slice(1)) {
+    const lines     = block.split('\n');
+    const header    = lines[0].trim();
+    const pipeIdx   = header.indexOf('|');
+    const title     = pipeIdx > -1 ? header.slice(0, pipeIdx).trim() : header;
+    const company   = pipeIdx > -1 ? header.slice(pipeIdx + 1).split('·')[0].trim() : '';
+    const dateLine  = lines.find(l => /\*\*[A-Z]/.test(l)) || '';
+    const dateM     = dateLine.match(/\*\*([^–\-*]+?)\s*[–\-]+\s*([^*]+?)\*\*/);
+    const startDate = dateM ? dateM[1].trim() : '';
+    const endDate   = dateM ? dateM[2].trim() : '';
+    const isCurrent = /present/i.test(endDate);
+    const bullets   = lines.filter(l => l.trim().startsWith('*')).map(l => l.replace(/^\s*\*\s*/, '').trim());
+    if (title && company) experience.push({ title, company, startDate, endDate, isCurrent, description: bullets.join('\n'), bullets });
+  }
+
+  const education = [];
+  for (const block of eduSection.split(/^## /m).slice(1)) {
+    const lines      = block.split('\n').filter(l => l.trim());
+    const heading    = lines[0]?.trim() || '';
+    const commaIdx   = heading.indexOf(',');
+    const degree     = commaIdx > -1 ? heading.slice(0, commaIdx).trim() : heading;
+    const field      = commaIdx > -1 ? heading.slice(commaIdx + 1).trim() : '';
+    const schoolLine = lines.find(l => l.includes('|')) || '';
+    const [school = '', datePart = ''] = schoolLine.split('|').map(s => s.trim());
+    const dateM      = datePart.match(/([A-Z][a-z]+ \d{4})\s*[–\-]+\s*([A-Z][a-z]+ \d{4})/);
+    const startDate  = dateM ? dateM[1] : '';
+    const endDate    = dateM ? dateM[2] : '';
+    if (degree && school) education.push({ degree, field, school, startDate, endDate });
+  }
+
+  return { experience, education };
+}
+
+function normalizeGhDegree(degree) {
+  if (/master/i.test(degree))               return "Master's Degree";
+  if (/bachelor|b\.(s|e|a)\./i.test(degree)) return "Bachelor's Degree";
+  if (/doctor|ph\.?d/i.test(degree))        return "Doctorate";
+  if (/associate/i.test(degree))             return "Associate's Degree";
+  return degree;
+}
+
+// ─── Greenhouse filler ────────────────────────────────────────────────────────
+async function fillGreenhouse(page, job, answersData, resumePath) {
+  const p = answersData.profile;
+  const needsAnswer = [];
+
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+  const bodyText = await page.textContent('body').catch(() => '');
+  if (/you('ve| have) already applied/i.test(bodyText) || /application (is )?already submitted/i.test(bodyText)) {
+    return { outcome: 'DUPLICATE' };
+  }
+
+  // Fill a plain text/tel input by selector, silently skip if not found
+  const setField = async (selector, value) => {
+    if (!value) return false;
+    const el = page.locator(selector).first();
+    if (await el.count() > 0) { await el.fill(String(value)).catch(() => {}); return true; }
+    return false;
+  };
+
+  // Interact with a React-Select dropdown (Greenhouse v2 uses these for custom selects)
+  // Clicks the container, waits for options menu, clicks the best match.
+  const fillReactSelect = async (containerLocator, value) => {
+    try {
+      await containerLocator.click();
+      await page.waitForTimeout(400);
+      // Options appear in a portal outside the container — search globally
+      const option = page.locator('[class*="option"]').filter({ hasText: new RegExp(`^${value}$`, 'i') }).first();
+      if (await option.count() === 0) {
+        // Try partial match
+        const partial = page.locator('[class*="option"]').filter({ hasText: value }).first();
+        if (await partial.count() > 0) { await partial.click(); return true; }
+        // Dismiss and give up
+        await page.keyboard.press('Escape');
+        return false;
+      }
+      await option.click();
+      return true;
+    } catch { return false; }
+  };
+
+  // Fuzzy native <select> filler — tries exact labels first, then partial substring match on option text
+  const trySelectFuzzy = async (selectEl, candidates) => {
+    for (const candidate of candidates) {
+      const ok = await selectEl.selectOption({ label: candidate }).then(() => true).catch(() => false);
+      if (ok) return true;
+    }
+    // Enumerate all options and find the best partial match
+    const opts = await selectEl.evaluate(el =>
+      Array.from(el.options).filter(o => o.value).map(o => ({ value: o.value, text: o.text.trim() }))
+    ).catch(() => []);
+    for (const candidate of candidates) {
+      const cLower = candidate.toLowerCase();
+      const best = opts.find(o => o.text.toLowerCase().includes(cLower) || cLower.includes(o.text.toLowerCase().trim()));
+      if (best) return await selectEl.selectOption({ value: best.value }).then(() => true).catch(() => false);
+    }
+    return false;
+  };
+
+  // Searchable React-Select — types to filter before picking (needed for school/university pickers)
+  const fillReactSelectSearch = async (containerLocator, value) => {
+    try {
+      await containerLocator.click();
+      await page.waitForTimeout(300);
+      await page.keyboard.type(value.slice(0, Math.min(value.length, 20)), { delay: 40 });
+      await page.waitForTimeout(800);
+      const option = page.locator('[class*="option"]').filter({ hasText: new RegExp(`^${value}$`, 'i') }).first();
+      if (await option.count() === 0) {
+        const partial = page.locator('[class*="option"]').filter({ hasText: value }).first();
+        if (await partial.count() > 0) { await partial.click(); return true; }
+        await page.keyboard.press('Escape');
+        return false;
+      }
+      await option.click();
+      return true;
+    } catch { return false; }
+  };
+
+  // ── Standard profile fields (v1 and v2 IDs) ─────────────────────────────────
+  await setField('input#first_name, input[name="first_name"]', p.first_name);
+  await setField('input#last_name,  input[name="last_name"]',  p.last_name);
+  await setField('input#email,      input[name="email"]',      p.email);
+  // Phone — fill the tel input; country code handled separately below
+  await setField('input#phone, input[type="tel"]', p.phone);
+
+  // Phone country code — Greenhouse v2 wraps phone + country in .phone-input
+  // The country selector is a React-Select with id="country" inside that wrapper
+  const phoneWrapper = page.locator('.phone-input').first();
+  if (await phoneWrapper.count() > 0) {
+    const countryContainer = phoneWrapper.locator('[class*="-container"]').first();
+    if (await countryContainer.count() > 0) await fillReactSelect(countryContainer, 'United States');
+  }
+
+  // Location (City) — React-Select on v2 (haspopup=true), plain input on v1
+  const locInput = page.locator('input#candidate-location').first();
+  if (await locInput.count() > 0) {
+    const isReact = (await locInput.getAttribute('aria-haspopup').catch(() => null)) === 'true';
+    if (isReact) {
+      // Type city to trigger autocomplete then pick first match
+      await locInput.click();
+      await locInput.type(p.city, { delay: 40 });
+      await page.waitForTimeout(700);
+      const firstOption = page.locator('[class*="option"]').first();
+      if (await firstOption.count() > 0) await firstOption.click();
+      else await page.keyboard.press('Escape');
+    } else {
+      await locInput.fill(p.city).catch(() => {});
+    }
+  }
+
+  // EEO / demographics with fixed IDs — all React-Selects on v2
+  const eeoFields = [
+    { id: 'gender',             answerId: 'gender' },
+    { id: 'hispanic_ethnicity', answerId: 'race_ethnicity' },
+    { id: 'veteran_status',     answerId: 'veteran_status' },
+    { id: 'disability_status',  answerId: 'disability_status' },
+  ];
+  for (const { id, answerId } of eeoFields) {
+    const el = page.locator(`input#${id}`).first();
+    if (await el.count() === 0) continue;
+    const isReact = (await el.getAttribute('aria-haspopup').catch(() => null)) === 'true';
+    if (!isReact) continue;
+    const match = answersData.answers.find(a => a.id === answerId);
+    if (!match) continue;
+    const container = page.locator(`input#${id}`).locator('..').locator('[class*="-container"]').first();
+    // Greenhouse puts the React-Select container as a sibling/ancestor — locate via label
+    const wrapper = page.locator(`.select__container:has(#${id})`).first();
+    const cont = await wrapper.count() > 0
+      ? wrapper.locator('[class*="-container"]').first()
+      : page.locator(`#${id}`).locator('xpath=ancestor::div[contains(@class,"container")]').first();
+    await fillReactSelect(cont, match.answer_short || match.answer).catch(() => {});
+  }
+
+  // LinkedIn / Website (v1 IDs — v2 puts these in custom question blocks)
+  await setField('input#job_application_linkedin_url, input[aria-label="LinkedIn Profile URL"]', p.linkedin);
+  await setField('input#job_application_website', p.website || '');
+
+  // Education (Greenhouse v2 uses school--0 and degree--0 as searchable React-Select IDs)
+  // `seen` is declared here so education labels can be pre-populated before the custom loop
+  const seen = new Set();
+  const cvData = parseCV();
+  const primaryEdu = cvData.education[0];
+  const eduIds = primaryEdu ? [
+    { id: 'school--0', value: primaryEdu.school,                    searchable: true },
+    { id: 'degree--0', value: normalizeGhDegree(primaryEdu.degree), searchable: false },
+  ] : [];
+  for (const edu of eduIds) {
+    const el = page.locator(`input#${edu.id}`).first();
+    if (await el.count() === 0) continue;
+    // Mark the label as seen so the custom loop skips it
+    const wrapper = page.locator(`.select__container:has(#${edu.id}), .input-wrapper:has(#${edu.id})`).first();
+    const eduLabel = (await wrapper.locator('label').first().textContent().catch(() => '') || '').replace(/\*/g, '').trim();
+    if (eduLabel) seen.add(eduLabel);
+    const cont = await wrapper.count() > 0
+      ? wrapper.locator('[class*="-container"]').first()
+      : el.locator('xpath=ancestor::div[contains(@class,"-container")]').first();
+    if (edu.searchable) {
+      await fillReactSelectSearch(cont, edu.value).catch(() => {});
+    } else {
+      await fillReactSelect(cont, edu.value).catch(() => {});
+    }
+  }
+
+  // Resume upload
+  if (resumePath && existsSync(resumePath)) {
+    const fileInput = page.locator('input[type="file"]#resume, input[type="file"]').first();
+    if (await fileInput.count() > 0) {
+      await fileInput.setInputFiles(resumePath);
+      await page.waitForTimeout(1500);
+    }
+  }
+
+  // Work Experience — fill Greenhouse v1 structured fields directly from cv.md
+  // Bypasses ATS PDF parsing which mis-formats long resume bullets across lines
+  const ghParseMonthYear = (str) => {
+    const months = { January:1,February:2,March:3,April:4,May:5,June:6,July:7,
+      August:8,September:9,October:10,November:11,December:12,
+      Jan:1,Feb:2,Mar:3,Apr:4,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+    const m = str?.match(/([A-Z][a-z]+)\s+(\d{4})/);
+    return m ? { month: String(months[m[1]] || ''), year: m[2] } : { month: '', year: '' };
+  };
+  if (cvData.experience.length > 0) {
+    for (let i = 0; i < cvData.experience.length; i++) {
+      const exp = cvData.experience[i];
+      if (i > 0) {
+        const addBtn = page.locator(
+          'button:has-text("Add another position"), button:has-text("Add Work Experience"), a:has-text("Add another")'
+        ).first();
+        if (await addBtn.count() > 0) { await addBtn.click(); await page.waitForTimeout(600); }
+      }
+      const base = `job_application[work_experiences][${i}]`;
+      const coInput = page.locator(`input[name="${base}[company_name]"]`).first();
+      if (await coInput.count() > 0) await coInput.fill(exp.company).catch(() => {});
+      const titleInput = page.locator(`input[name="${base}[title]"]`).first();
+      if (await titleInput.count() > 0) await titleInput.fill(exp.title).catch(() => {});
+      const descInput = page.locator(`textarea[name="${base}[description]"]`).first();
+      if (await descInput.count() > 0) await descInput.fill(exp.description).catch(() => {});
+      const start = ghParseMonthYear(exp.startDate);
+      const end   = ghParseMonthYear(exp.endDate);
+      const smSel = page.locator(`select[name="${base}[start_date][month]"]`).first();
+      const sySel = page.locator(`select[name="${base}[start_date][year]"]`).first();
+      if (start.month && await smSel.count() > 0) await smSel.selectOption(start.month).catch(() => {});
+      if (start.year  && await sySel.count()  > 0) await sySel.selectOption(start.year).catch(() => {});
+      if (exp.isCurrent) {
+        const cb = page.locator(`input[name="${base}[current_position]"]`).first();
+        if (await cb.count() > 0 && !(await cb.isChecked())) await cb.check().catch(() => {});
+      } else {
+        const emSel = page.locator(`select[name="${base}[end_date][month]"]`).first();
+        const eySel = page.locator(`select[name="${base}[end_date][year]"]`).first();
+        if (end.month && await emSel.count() > 0) await emSel.selectOption(end.month).catch(() => {});
+        if (end.year  && await eySel.count()  > 0) await eySel.selectOption(end.year).catch(() => {});
+      }
+    }
+  }
+
+  // Cover letter — textarea only; Greenhouse v1 uses input[type=file]#cover_letter
+  const clField = page.locator('textarea[name*="cover"], textarea#cover_letter, textarea[placeholder*="cover"]').first();
+  if (await clField.count() > 0) {
+    const tag = await clField.evaluate(el => el.tagName.toLowerCase()).catch(() => '');
+    if (tag === 'textarea') {
+      const cl = answersData.answers.find(a => a.id === 'cover_letter');
+      if (cl) await clField.fill(cl.answer).catch(() => {});
+    }
+  }
+
+  // ── Custom question blocks ───────────────────────────────────────────────────
+  // Greenhouse v1 uses .field; v2 uses .input-wrapper (text) and .select__container (React-Select)
+  const questionBlocks = await page.locator(
+    '.field, .application-question, [data-field-type], .input-wrapper, .select__container'
+  ).all();
+
+  for (const block of questionBlocks) {
+    try {
+      const labelEl = block.locator('label').first();
+      const label = (await labelEl.textContent().catch(() => '') || '').replace(/\*/g, '').trim();
+      if (!label || seen.has(label)) continue;
+      seen.add(label);
+
+      const lbl = label.toLowerCase();
+
+      // ── Skip labels already handled deterministically (profile + EEO fields)
+      // Prevents them appearing in needsAnswer when .field-wrapper also wraps them
+      if (/^(first name|last name|preferred (first )?name|email|phone|country|location|city|state|zip|postal|address|gender|veteran|disability|hispanic|ethnicity|race)/.test(lbl)) continue;
+
+      // ── "City, State" free-text field ───────────────────────────────────────
+      if (lbl.includes('city') || (lbl.includes('current location') && lbl.includes('city'))) {
+        const inp = block.locator('input[type="text"]').first();
+        if (await inp.count() > 0) await inp.fill(`${p.city}, ${p.state_abbr}`).catch(() => {});
+        continue;
+      }
+
+      // ── Profile URL fields (v2 puts these as custom questions) ──────────────
+      if (lbl.includes('linkedin')) {
+        await setField(`#${await block.locator('input[type="text"]').first().getAttribute('id').catch(() => '__none__')}`, p.linkedin);
+        // Fallback: fill by aria-label
+        await block.locator('input[type="text"]').first().fill(p.linkedin).catch(() => {});
+        continue;
+      }
+      if (lbl === 'website' || lbl.includes('portfolio') || lbl.includes('personal site')) {
+        const val = p.website || '';
+        if (val) await block.locator('input[type="text"]').first().fill(val).catch(() => {});
+        continue;
+      }
+      if (lbl === 'github' || lbl.includes('github url')) {
+        if (p.github) await block.locator('input[type="text"]').first().fill(p.github).catch(() => {});
+        continue;
+      }
+
+      // ── Export control checkboxes — check "None of the above" ───────────────
+      if (lbl.includes('export control') || lbl.includes('sanctioned country') ||
+          lbl.includes('export restrictions') ||
+          /citizen or permanent resident of (cuba|iran|north korea|syria|crimea)/i.test(lbl)) {
+        const checkboxes = await block.locator('input[type="checkbox"]').all();
+        for (const cb of checkboxes) {
+          const cbId = await cb.getAttribute('id').catch(() => '') || '';
+          const cbLabelText = cbId
+            ? (await page.locator(`label[for="${cbId}"]`).textContent().catch(() => '') || '')
+            : (await cb.locator('xpath=following-sibling::label[1]').textContent().catch(() => '') || '');
+          if (/none of the above/i.test(cbLabelText)) { await cb.check().catch(() => {}); break; }
+        }
+        continue;
+      }
+
+      // ── Work auth — hardcoded, never delegate to LLM ────────────────────────
+      if (isWorkAuthLabel(label)) {
+        const answer = workAuthAnswer(label, answersData);
+        if (!answer) continue;
+
+        // Try native radio buttons (v1)
+        const yesRadio = block.locator('input[type="radio"][value="Yes"], input[type="radio"][value="true"], input[type="radio"][id*="yes"]').first();
+        const noRadio  = block.locator('input[type="radio"][value="No"],  input[type="radio"][value="false"], input[type="radio"][id*="no"]').first();
+        if (answer === 'Yes' && await yesRadio.count() > 0) { await yesRadio.check(); continue; }
+        if (answer === 'No'  && await noRadio.count()  > 0) { await noRadio.check();  continue; }
+
+        // Try native select (v1 variant)
+        const sel = block.locator('select').first();
+        if (await sel.count() > 0) {
+          await trySelectFuzzy(sel, [answer]);
+          continue;
+        }
+
+        // Try React-Select (v2) — container is .select-shell or [class*="container"]
+        const reactContainer = block.locator('.select-shell, [class*="-container"]').first();
+        if (await reactContainer.count() > 0) {
+          await fillReactSelect(reactContainer, answer);
+        }
+        continue;
+      }
+
+      // ── Known answer patterns ────────────────────────────────────────────────
+      const match = matchAnswer(label, answersData);
+      if (match) {
+        const textarea      = block.locator('textarea').first();
+        const input         = block.locator('input[type="text"], input:not([type])').first();
+        const select        = block.locator('select').first();
+        const radios        = block.locator('input[type="radio"]');
+        const checkboxes    = block.locator('input[type="checkbox"]');
+        const reactContainer = block.locator('.select-shell, [class*="-container"]').first();
+
+        if (await textarea.count() > 0) {
+          await textarea.fill(match.answer).catch(() => {});
+        } else if (await checkboxes.count() > 0) {
+          // Checkbox group (e.g. "mark all that apply" race/ethnicity) — find and check matching option
+          const answerText = (match.answer_short || match.answer).toLowerCase();
+          for (const cb of await checkboxes.all()) {
+            const cbId  = await cb.getAttribute('id').catch(() => '') || '';
+            const cbLbl = cbId
+              ? (await page.locator(`label[for="${cbId}"]`).textContent().catch(() => '') || '')
+              : (await cb.locator('xpath=following-sibling::*[1][self::label]').textContent().catch(() => '') || '');
+            if (cbLbl.toLowerCase().includes(answerText) || answerText.includes(cbLbl.toLowerCase().trim())) {
+              await cb.check().catch(() => {});
+              break;
+            }
+          }
+        } else if (await radios.count() > 0) {
+          const ans = match.answer_bool != null ? match.answer_bool
+            : match.answer === 'Yes' ? true : match.answer === 'No' ? false : null;
+          if (ans !== null) await radios.nth(ans ? 0 : 1).check().catch(() => {});
+        } else if (await select.count() > 0) {
+          const candidates = match.options_priority
+            ? match.options_priority
+            : [match.answer_short || match.answer];
+          await trySelectFuzzy(select, candidates);
+        } else if (await reactContainer.count() > 0) {
+          // React-Select dropdown
+          const val = match.answer_short || match.answer;
+          await fillReactSelect(reactContainer, val);
+        } else if (await input.count() > 0) {
+          await input.fill(match.answer_short || match.answer).catch(() => {});
+        }
+      } else {
+        needsAnswer.push(label);
+      }
+    } catch (blockErr) {
+      console.warn('Question block error (skipped):', blockErr.message);
+    }
+  }
+
+  return needsAnswer.length > 0
+    ? { outcome: 'NEEDS_ANSWER', needsAnswer }
+    : { outcome: 'FILLED_PENDING_REVIEW' };
+}
+
+// ─── Lever filler ─────────────────────────────────────────────────────────────
+async function fillLever(page, job, answersData, resumePath) {
+  const p = answersData.profile;
+  const needsAnswer = [];
+
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+  const bodyText = await page.textContent('body').catch(() => '');
+  if (/already applied/i.test(bodyText)) return { outcome: 'DUPLICATE' };
+
+  const setField = async (selector, value) => {
+    const el = page.locator(selector).first();
+    if (await el.count() > 0) { await el.fill(value); return true; }
+    return false;
+  };
+
+  await setField('input[name="name"]', p.full_name);
+  await setField('input[name="email"]', p.email);
+  await setField('input[name="phone"]', p.phone);
+  await setField('input[name="org"], input[name="company"]', 'Innovaccer Inc.');
+  await setField('input[name="linkedin"], input[placeholder*="LinkedIn"]', p.linkedin);
+  await setField('input[name="urls[LinkedIn]"]', p.linkedin);
+
+  // Resume upload
+  if (resumePath && existsSync(resumePath)) {
+    const fileInput = page.locator('input[type="file"]').first();
+    if (await fileInput.count() > 0) {
+      await fileInput.setInputFiles(resumePath);
+      await page.waitForTimeout(1500);
+    }
+  }
+
+  // Lever custom questions — each in a .application-question div
+  const questions = await page.locator('.application-question, [data-qa="additional-cards"] .form-item').all();
+  for (const q of questions) {
+    const labelEl = q.locator('label, .application-label').first();
+    const label = await labelEl.textContent().catch(() => '') || '';
+    if (!label.trim()) continue;
+
+    if (isWorkAuthLabel(label)) {
+      const answer = workAuthAnswer(label, answersData);
+      if (answer) {
+        const radios = q.locator('input[type="radio"]');
+        if (await radios.count() >= 2) {
+          const idx = answer === 'Yes' ? 0 : 1;
+          await radios.nth(idx).check().catch(() => {});
+        } else {
+          const sel = q.locator('select').first();
+          if (await sel.count() > 0) await sel.selectOption({ label: answer }).catch(() => {});
+        }
+      }
+      continue;
+    }
+
+    const match = matchAnswer(label, answersData);
+    if (match) {
+      const textarea = q.locator('textarea').first();
+      const input    = q.locator('input[type="text"], input:not([type])').first();
+      const select   = q.locator('select').first();
+      if (await textarea.count() > 0) await textarea.fill(match.answer);
+      else if (await input.count() > 0) await input.fill(match.answer_short || match.answer);
+      else if (await select.count() > 0 && match.options_priority) {
+        for (const opt of match.options_priority) {
+          const ok = await select.selectOption({ label: opt }).then(() => true).catch(() => false);
+          if (ok) break;
+        }
+      }
+    } else {
+      needsAnswer.push(label.trim());
+    }
+  }
+
+  return needsAnswer.length > 0
+    ? { outcome: 'NEEDS_ANSWER', needsAnswer }
+    : { outcome: 'FILLED_PENDING_REVIEW' };
+}
+
+// ─── Ashby filler ────────────────────────────────────────────────────────────
+async function fillAshby(page, job, answersData, resumePath) {
+  const p = answersData.profile;
+  const needsAnswer = [];
+
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+  const bodyText = await page.textContent('body').catch(() => '');
+  if (/already applied/i.test(bodyText)) return { outcome: 'DUPLICATE' };
+
+  const setByLabel = async (labelText, value) => {
+    const label = page.locator(`label:has-text("${labelText}")`).first();
+    if (await label.count() === 0) return false;
+    const id = await label.getAttribute('for');
+    if (id) {
+      const inp = page.locator(`#${id}`).first();
+      if (await inp.count() > 0) { await inp.fill(value); return true; }
+    }
+    const parent = label.locator('..');
+    const inp = parent.locator('input, textarea').first();
+    if (await inp.count() > 0) { await inp.fill(value); return true; }
+    return false;
+  };
+
+  await setByLabel('First Name', p.first_name);
+  await setByLabel('Last Name',  p.last_name);
+  await setByLabel('Email',      p.email);
+  await setByLabel('Phone',      p.phone);
+  await setByLabel('LinkedIn',   p.linkedin);
+
+  // Resume upload
+  if (resumePath && existsSync(resumePath)) {
+    const fileInput = page.locator('input[type="file"]').first();
+    if (await fileInput.count() > 0) {
+      await fileInput.setInputFiles(resumePath);
+      await page.waitForTimeout(1500);
+    }
+  }
+
+  // Ashby custom fields
+  const formFields = await page.locator('[class*="ApplicationForm"] [class*="Field"], .ashby-application-form-field').all();
+  for (const field of formFields) {
+    const labelEl = field.locator('label').first();
+    const label = await labelEl.textContent().catch(() => '') || '';
+    if (!label.trim()) continue;
+
+    if (isWorkAuthLabel(label)) {
+      const answer = workAuthAnswer(label, answersData);
+      if (answer) {
+        const sel = field.locator('select').first();
+        const radios = field.locator('input[type="radio"]');
+        if (await sel.count() > 0) {
+          await sel.selectOption({ label: answer }).catch(() =>
+            sel.selectOption({ value: answer }).catch(() => {})
+          );
+        } else if (await radios.count() > 0) {
+          const idx = answer === 'Yes' ? 0 : 1;
+          await radios.nth(idx).check().catch(() => {});
+        }
+      }
+      continue;
+    }
+
+    const match = matchAnswer(label, answersData);
+    if (match) {
+      const textarea = field.locator('textarea').first();
+      const input    = field.locator('input[type="text"], input:not([type="radio"]):not([type="checkbox"]):not([type="file"])').first();
+      const select   = field.locator('select').first();
+      if (await textarea.count() > 0) await textarea.fill(match.answer);
+      else if (await input.count() > 0) await input.fill(match.answer_short || match.answer);
+      else if (await select.count() > 0 && match.options_priority) {
+        for (const opt of match.options_priority) {
+          const ok = await select.selectOption({ label: opt }).then(() => true).catch(() => false);
+          if (ok) break;
+        }
+      }
+    } else {
+      needsAnswer.push(label.trim());
+    }
+  }
+
+  return needsAnswer.length > 0
+    ? { outcome: 'NEEDS_ANSWER', needsAnswer }
+    : { outcome: 'FILLED_PENDING_REVIEW' };
+}
+
+// ─── Workday filler ───────────────────────────────────────────────────────────
+async function fillWorkday(page, job, answersData, resumePath) {
+  const p = answersData.profile;
+  const needsAnswer = [];
+  let fieldsFound = 0;
+  const cvData = parseCV();
+
+  const waitSettle = async (ms = 2500) => {
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(ms);
+  };
+
+  // ── Helper: fill a Workday text input by data-automation-id ─────────────
+  const setWd = async (automationId, value) => {
+    if (!value) return false;
+    const el = page.locator(`[data-automation-id="${automationId}"]`).first();
+    if (await el.count() === 0) return false;
+    await el.fill(String(value)).catch(() => {});
+    return true;
+  };
+
+  // ── Helper: click a button/link by text (case-insensitive) ───────────────
+  const clickText = async (...texts) => {
+    for (const text of texts) {
+      const loc = page.locator(`button:has-text("${text}"), a:has-text("${text}")`).first();
+      if (await loc.count() > 0) {
+        await loc.click().catch(() => {});
+        await waitSettle();
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const wdParseMonthYear = (str) => {
+    const months = { January:1,February:2,March:3,April:4,May:5,June:6,July:7,
+      August:8,September:9,October:10,November:11,December:12,
+      Jan:1,Feb:2,Mar:3,Apr:4,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+    const m = str?.match(/([A-Z][a-z]+)\s+(\d{4})/);
+    return m ? { month: String(months[m[1]] || ''), year: m[2] } : { month: '', year: '' };
+  };
+
+  // ── Helper: fill Workday work experience section if present on current page ─
+  const fillWorkdayWorkExp = async () => {
+    const addBtn = page.locator(
+      'button:has-text("Add Work Experience"), button:has-text("Add a Work Experience"), ' +
+      'a:has-text("Add Work Experience"), [data-automation-id*="workExperience"] button[data-automation-id*="add"]'
+    ).first();
+    if (await addBtn.count() === 0) return;
+    for (const exp of cvData.experience) {
+      try {
+        await addBtn.click();
+        await page.waitForTimeout(1000);
+        const setF = async (id, val) => {
+          const el = page.locator(`[data-automation-id="${id}"]`).first();
+          if (await el.count() > 0 && val) await el.fill(String(val)).catch(() => {});
+        };
+        await setF('jobTitle', exp.title);
+        await setF('company',  exp.company);
+        await setF('description', exp.description);
+        const start = wdParseMonthYear(exp.startDate);
+        const end   = wdParseMonthYear(exp.endDate);
+        await setF('startDate-dateSectionMonth-input', start.month);
+        await setF('startDate-dateSectionYear-input',  start.year);
+        if (exp.isCurrent) {
+          const cb = page.locator('[data-automation-id="currentlyWorkHere"]').first();
+          if (await cb.count() > 0) await cb.check().catch(() => {});
+        } else {
+          await setF('endDate-dateSectionMonth-input', end.month);
+          await setF('endDate-dateSectionYear-input',  end.year);
+        }
+        const saveBtn = page.locator(
+          '[data-automation-id="Add-workExperience-save"], button:has-text("OK"), button:has-text("Save")'
+        ).first();
+        if (await saveBtn.count() > 0) await saveBtn.click().catch(() => {});
+        await page.waitForTimeout(800);
+      } catch {}
+    }
+  };
+
+  // ── Helper: fill Workday education section if present on current page ─────
+  const fillWorkdayEducation = async () => {
+    const addBtn = page.locator(
+      'button:has-text("Add Education"), button:has-text("Add a School"), ' +
+      'a:has-text("Add Education"), [data-automation-id*="education"] button[data-automation-id*="add"]'
+    ).first();
+    if (await addBtn.count() === 0) return;
+    for (const edu of cvData.education) {
+      try {
+        await addBtn.click();
+        await page.waitForTimeout(1000);
+        const setF = async (id, val) => {
+          const el = page.locator(`[data-automation-id="${id}"]`).first();
+          if (await el.count() > 0 && val) await el.fill(String(val)).catch(() => {});
+        };
+        await setF('school', edu.school);
+        const degreeEl = page.locator('[data-automation-id="degree"]').first();
+        if (await degreeEl.count() > 0) {
+          const normalized = normalizeGhDegree(edu.degree);
+          const tag = await degreeEl.evaluate(el => el.tagName.toLowerCase()).catch(() => '');
+          if (tag === 'select') await degreeEl.selectOption({ label: normalized }).catch(() => {});
+          else await degreeEl.fill(normalized).catch(() => {});
+        }
+        await setF('fieldOfStudy', edu.field);
+        const saveBtn = page.locator(
+          '[data-automation-id*="save"], button:has-text("OK"), button:has-text("Save")'
+        ).first();
+        if (await saveBtn.count() > 0) await saveBtn.click().catch(() => {});
+        await page.waitForTimeout(800);
+      } catch {}
+    }
+  };
+
+  await waitSettle(1500);
+
+  // ── Step 1: Click Apply if still on the job listing page ─────────────────
+  const applyBtn = page.locator(
+    '[data-automation-id="applyNowButton"], [data-automation-id="applyNowButtonDesktop"]'
+  ).first();
+  if (await applyBtn.count() > 0) {
+    await applyBtn.click();
+    await waitSettle(3000);
+  }
+
+  // ── Step 2: Handle account / guest-apply dialog (many Workday variants) ──
+  // Try selectors in priority order: data-automation-id first, then button text
+  const guestSelectors = [
+    '[data-automation-id="applyManually"]',
+    '[data-automation-id="guest-apply-button"]',
+    '[data-automation-id="continueAsGuest"]',
+  ];
+  let guestClicked = false;
+  for (const sel of guestSelectors) {
+    const el = page.locator(sel).first();
+    if (await el.count() > 0) {
+      await el.click().catch(() => {});
+      await waitSettle();
+      guestClicked = true;
+      break;
+    }
+  }
+  if (!guestClicked) {
+    // Text-based fallbacks (Workday changes button labels between tenants)
+    guestClicked = await clickText(
+      'Apply Manually', 'Apply Without an Account', 'Continue as Guest',
+      'Apply as Guest', 'Skip for now', 'Continue without signing in'
+    );
+  }
+
+  // ── Step 3: Country / language selection page (some tenants) ─────────────
+  // If there's a "Save and Continue" or "Next" on a country-select page, advance past it
+  const countryField = page.locator('[data-automation-id="countryDropdown"]').first();
+  if (await countryField.count() > 0) {
+    await clickText('Save and Continue', 'Next', 'Continue');
+    await waitSettle();
+  }
+
+  // ── Step 4: Fill personal info (Page 1 of most Workday flows) ────────────
+  const filled1 = [
+    await setWd('legalNameSection_firstName', p.first_name),
+    await setWd('legalNameSection_lastName',  p.last_name),
+    await setWd('firstName',  p.first_name),
+    await setWd('lastName',   p.last_name),
+    await setWd('email',      p.email),
+    await setWd('phone',      p.phone),
+    await setWd('addressSection_addressLine1', p.street || ''),
+    await setWd('addressSection_city',         p.city   || ''),
+    await setWd('addressSection_postalCode',   p.zip || p.postal_code || ''),
+  ].filter(Boolean).length;
+  fieldsFound += filled1;
+
+  // ── Step 5: Resume upload ─────────────────────────────────────────────────
+  if (resumePath && existsSync(resumePath)) {
+    const fileInput = page.locator('input[type="file"]').first();
+    if (await fileInput.count() > 0) {
+      await fileInput.setInputFiles(resumePath).catch(() => {});
+      await page.waitForTimeout(2500);
+      fieldsFound++;
+    }
+  }
+
+  // ── Step 6: Work auth + custom questions on current page ─────────────────
+  const fillFormFields = async () => {
+    const formFields = await page.locator('[data-automation-id^="formField-"]').all();
+    for (const field of formFields) {
+      try {
+        const labelEl = field.locator(
+          '[data-automation-id^="questionTitle"], legend, label'
+        ).first();
+        const label = (await labelEl.textContent().catch(() => '') || '').replace(/\*/g, '').trim();
+        if (!label) continue;
+        fieldsFound++;
+
+        if (isWorkAuthLabel(label)) {
+          const answer = workAuthAnswer(label, answersData);
+          if (!answer) continue;
+          const radios = field.locator('input[type="radio"]');
+          if (await radios.count() >= 2) {
+            if (answer === 'Yes') await radios.nth(0).click().catch(() => {});
+            else                  await radios.nth(1).click().catch(() => {});
+          }
+          continue;
+        }
+
+        const match = matchAnswer(label, answersData);
+        if (match) {
+          const textarea = field.locator('textarea').first();
+          const input    = field.locator('input[type="text"]').first();
+          if (await textarea.count() > 0)      await textarea.fill(match.answer).catch(() => {});
+          else if (await input.count() > 0)    await input.fill(match.answer_short || match.answer).catch(() => {});
+        } else {
+          needsAnswer.push(label);
+        }
+      } catch {}
+    }
+  };
+
+  await fillFormFields();
+  await fillWorkdayWorkExp();
+  await fillWorkdayEducation();
+
+  // ── Step 7: Advance through multi-page form (up to 6 more pages) ─────────
+  for (let page_n = 0; page_n < 6; page_n++) {
+    const nextBtn = page.locator(
+      '[data-automation-id="bottom-navigation-next-button"], ' +
+      '[data-automation-id="next-button"], ' +
+      'button:has-text("Next"), button:has-text("Save and Continue")'
+    ).first();
+    if (await nextBtn.count() === 0) break;
+    const isDisabled = await nextBtn.isDisabled().catch(() => true);
+    if (isDisabled) break;
+    await nextBtn.click();
+    await waitSettle(2000);
+    // Re-fill personal info in case Workday re-shows it on a new page
+    await setWd('legalNameSection_firstName', p.first_name);
+    await setWd('legalNameSection_lastName',  p.last_name);
+    await setWd('email', p.email);
+    await fillFormFields();
+    await fillWorkdayWorkExp();
+    await fillWorkdayEducation();
+  }
+
+  if (fieldsFound === 0) {
+    // Nothing was reachable — likely stuck on sign-in wall or unsupported dialog
+    return { outcome: 'NEEDS_MANUAL', reason: 'Workday form not reached — may require account sign-in' };
+  }
+
+  return needsAnswer.length > 0
+    ? { outcome: 'NEEDS_ANSWER', needsAnswer }
+    : { outcome: 'FILLED_PENDING_REVIEW' };
+}
+
+// ─── Screenshot helper ────────────────────────────────────────────────────────
+async function screenshot(page, num) {
+  mkdirSync(ssDir(), { recursive: true });
+  const ts  = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const out = join(ssDir(), `${num}-${ts}.png`);
+  await page.screenshot({ path: out, fullPage: true }).catch(() => {});
+  return out;
+}
+
+// ─── Exports (used by fill-agent.mjs when imported as a module) ──────────────
+export {
+  fillGreenhouse, fillLever, fillAshby, fillWorkday,
+  detectATS, loadAnswers, matchAnswer, workAuthAnswer, isWorkAuthLabel,
+  lookupJob, extractUrlFromReport, CAREER_OPS,
+};
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+if (isMain) (async () => {
+  const answersData = loadAnswers();
+  let jobNum = numArg ? parseInt(numArg) : 0;
+  let jobUrl = urlArg || null;
+  let job    = null;
+  let resumePath = null;
+
+  // Resolve job info
+  if (jobNum) {
+    job = lookupJob(jobNum);
+    if (!job) {
+      console.error(`Job #${jobNum} not found in applications.md`);
+      writeStatus(jobNum, APPLY_STATUS.ERROR, { error: 'Job not found in tracker' });
+      process.exit(1);
+    }
+    jobUrl = jobUrl || extractUrlFromReport(job.reportPath);
+    if (!jobUrl) {
+      console.error(`No URL found for job #${jobNum}`);
+      writeStatus(jobNum, APPLY_STATUS.ERROR, { error: 'Job URL not found in report' });
+      process.exit(1);
+    }
+
+    // Priority 1: tailored PDF in output/{reportNum}-{slug}/resume.pdf
+    // (generated by /career-ops pdf during auto-pipeline)
+    if (job.reportPath) {
+      const m = job.reportPath.replace(/^(\.\.\/)+/, '').match(/reports\/(\d+)-(.+)-\d{4}-\d{2}-\d{2}\.md/);
+      if (m) {
+        const tailored = join(CAREER_OPS, 'output', `${m[1]}-${m[2]}`, 'resume.pdf');
+        if (existsSync(tailored)) {
+          resumePath = tailored;
+          console.log(`Using tailored PDF: output/${m[1]}-${m[2]}/resume.pdf`);
+        }
+      }
+    }
+
+    // Priority 2: archetype resume from Recommended CV in tracker notes
+    if (!resumePath && job.recommendedCv) {
+      const archetypePath = resolve(join(CAREER_OPS, job.recommendedCv));
+      if (existsSync(archetypePath)) {
+        resumePath = archetypePath;
+        console.log(`Using archetype resume: ${job.recommendedCv}`);
+      }
+    }
+  }
+
+  if (!jobNum) jobNum = 0; // URL-only mode, no tracker num
+
+  // Priority 3: generic fallback
+  if (!resumePath || !existsSync(resumePath)) {
+    const fallback = join(CAREER_OPS, 'Resume', 'generic', 'resume.pdf');
+    if (existsSync(fallback)) {
+      resumePath = fallback;
+      console.log('Using fallback: Resume/generic/resume.pdf');
+    }
+  }
+
+  const ats = detectATS(jobUrl);
+  console.log(`Job #${jobNum} | ATS: ${ats} | URL: ${jobUrl}`);
+  console.log(`Resume: ${resumePath || 'none'}`);
+
+  // Unsupported ATS — bail early
+  const supported = ['greenhouse', 'lever', 'ashby', 'workday'];
+  if (!supported.includes(ats)) {
+    writeStatus(jobNum, APPLY_STATUS.NEEDS_MANUAL, {
+      url: jobUrl,
+      ats,
+      reason: `ATS "${ats}" is not supported by smart-apply. Fill this one manually.`,
+    });
+    console.log(`NEEDS_MANUAL — ATS "${ats}" not supported`);
+    process.exit(0);
+  }
+
+  writeStatus(jobNum, APPLY_STATUS.RUNNING, { url: jobUrl, ats });
+
+  const browser = await chromium.launch({ headless });
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  });
+  const page = await context.newPage();
+
+  let result = { outcome: APPLY_STATUS.ERROR, error: 'Unknown error' };
+
+  try {
+    await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(2000);
+
+    if (ats === 'greenhouse') {
+      result = await fillGreenhouse(page, job, answersData, resumePath);
+    } else if (ats === 'lever') {
+      result = await fillLever(page, job, answersData, resumePath);
+    } else if (ats === 'ashby') {
+      result = await fillAshby(page, job, answersData, resumePath);
+    } else if (ats === 'workday') {
+      result = await fillWorkday(page, job, answersData, resumePath);
+    }
+  } catch (err) {
+    result = { outcome: 'ERROR', error: err.message };
+  }
+
+  const ss = await screenshot(page, jobNum);
+  console.log(`Screenshot: ${ss}`);
+  console.log(`Outcome: ${result.outcome}`);
+  if (result.needsAnswer?.length) {
+    console.log('Questions needing answers:', result.needsAnswer);
+  }
+
+  writeStatus(jobNum, result.outcome, {
+    url: jobUrl,
+    ats,
+    screenshot: ss,
+    needsAnswer: result.needsAnswer || [],
+    error: result.error || null,
+    company: job?.company || '',
+    role: job?.role || '',
+  });
+
+  // In headed mode, keep browser open so user can review and submit manually.
+  // Inject a submit listener that captures the final form state on Submit click.
+  // In headless mode, close immediately.
+  if (!headless) {
+    // Expose a Node.js callback the browser can call with captured field data
+    // Build a set of company name tokens to detect company-specific questions
+    const companyTokens = (job?.company || '')
+      .toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(t => t.length > 2);
+
+    await page.exposeFunction('_captureFormAnswers', async (fields) => {
+      const answersFile = join(CAREER_OPS, 'data', 'application_answers.json');
+      try {
+        const data = JSON.parse(readFileSync(answersFile, 'utf-8'));
+        let added = 0;
+        for (const { label, value } of fields) {
+          if (!label || !value || !value.trim()) continue;
+          const lbl = label.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim();
+          // Skip profile fields (already handled deterministically)
+          if (/^(first|last|full.?name|email|phone|city|state|zip|postal|location|country|linkedin|website|github|address)/.test(lbl)) continue;
+          // Skip work auth (hardcoded — never override)
+          if (/authoriz|sponsor|citizen|visa|h.?1b|green.?card|work.?permit|eligible.?to.?work/.test(lbl)) continue;
+          // Skip company-specific questions (label contains company name tokens)
+          if (companyTokens.length > 0 && companyTokens.some(t => lbl.includes(t))) continue;
+          // Skip if a pattern already covers this label
+          const covered = data.answers.some(a =>
+            a.patterns?.some(p => lbl.includes(p.toLowerCase()) || p.toLowerCase().includes(lbl.slice(0, 20)))
+          );
+          if (covered) continue;
+          const id = lbl.replace(/\s+/g, '_').slice(0, 50);
+          data.answers.push({
+            id,
+            patterns: [lbl],
+            answer: value.trim(),
+            answer_short: value.trim().length > 80 ? value.trim().slice(0, 77) + '…' : value.trim(),
+            type: value.trim().split(/\s+/).length > 10 ? 'textarea' : 'text',
+            _source: 'form-capture',
+          });
+          added++;
+          console.log(`  Captured new answer: "${label}" → "${value.trim().slice(0, 60)}"`);
+        }
+        if (added > 0) {
+          writeFileSync(answersFile, JSON.stringify(data, null, 2));
+          console.log(`Saved ${added} new answer(s) to application_answers.json`);
+        }
+      } catch (e) {
+        console.warn('Failed to save captured answers:', e.message);
+      }
+    });
+
+    // Inject submit listener into the page — fires when user clicks Submit
+    await page.evaluate(() => {
+      const capture = () => {
+        const fields = [];
+        // Plain text inputs and textareas
+        document.querySelectorAll(
+          'input[type="text"], input[type="tel"], input[type="email"], input[type="number"], input:not([type]), textarea'
+        ).forEach(el => {
+          if (!el.value?.trim()) return;
+          const labelEl =
+            document.querySelector('label[for="' + el.id + '"]') ||
+            el.closest('[class*="wrapper"],[class*="field"],[class*="container"],[class*="question"]')?.querySelector('label');
+          const label = (labelEl?.textContent || el.getAttribute('aria-label') || el.placeholder || '')
+            .replace(/\*/g, '').trim();
+          if (label && label.length > 2) fields.push({ label, value: el.value.trim() });
+        });
+        // React-Select — read the displayed selected value
+        document.querySelectorAll('[class*="single-value"]').forEach(el => {
+          const val = el.textContent?.trim();
+          if (!val) return;
+          const wrap = el.closest('[class*="container"]')?.parentElement;
+          const labelEl = wrap?.querySelector('label') || wrap?.parentElement?.querySelector('label');
+          const label = (labelEl?.textContent || '').replace(/\*/g, '').trim();
+          if (label && label.length > 2) fields.push({ label, value: val });
+        });
+        window._captureFormAnswers(fields);
+      };
+
+      // Attach to submit buttons
+      document.querySelectorAll('button[type="submit"], input[type="submit"]').forEach(btn => {
+        btn.addEventListener('click', capture, { once: true });
+      });
+      // Fallback: attach to any button whose text looks like a submit action
+      document.querySelectorAll('button').forEach(btn => {
+        const t = (btn.textContent || '').toLowerCase().trim();
+        if (t === 'submit' || t === 'submit application' || t === 'apply now' || t === 'apply') {
+          btn.addEventListener('click', capture, { once: true });
+        }
+      });
+      // Also attach to form submit event as a safety net
+      document.querySelectorAll('form').forEach(form => {
+        form.addEventListener('submit', capture, { once: true });
+      });
+    }).catch(() => {}); // non-fatal if page context is gone
+
+    if (result.outcome === 'FILLED_PENDING_REVIEW') {
+      console.log('\nForm filled. Browser stays open — review, correct, and submit manually.');
+      console.log('New answers you type will be saved to application_answers.json on Submit.');
+    } else if (result.outcome === 'NEEDS_MANUAL') {
+      console.log(`\nNEEDS_MANUAL — ${result.reason || 'form not reached'}. Browser stays open — fill manually.`);
+    } else if (result.outcome === 'NEEDS_ANSWER') {
+      console.log('\nNEEDS_ANSWER — some questions need your input. Browser stays open.');
+    }
+    await page.waitForEvent('close', { timeout: 0 }).catch(() => {});
+  }
+
+  await browser.close();
+  process.exit(0);
+})(); // end isMain

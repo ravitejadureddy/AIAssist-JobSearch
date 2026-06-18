@@ -253,6 +253,8 @@ next_report_num_unlocked() {
       local basename
       basename=$(basename "$f")
       local num="${basename%%-*}"
+      # Skip non-numeric prefixes (malformed filenames must not crash arithmetic)
+      [[ "$num" =~ ^[0-9]+$ ]] || continue
       num=$((10#$num)) # Remove leading zeros for arithmetic
       if (( num > max_num )); then
         max_num=$num
@@ -263,6 +265,8 @@ next_report_num_unlocked() {
   if [[ -f "$STATE_FILE" ]]; then
     while IFS=$'\t' read -r _ _ _ _ _ rnum _ _ _; do
       [[ "$rnum" == "report_num" || "$rnum" == "-" || -z "$rnum" ]] && continue
+      # Skip non-integer values (e.g. a score like "3.3" stored in wrong column)
+      [[ "$rnum" =~ ^[0-9]+$ ]] || continue
       local n=$((10#$rnum))
       if (( n > max_num )); then
         max_num=$n
@@ -629,9 +633,9 @@ main() {
             running=$((running - 1))
           fi
         done
-        # Compact arrays
-        pids=("${pids[@]}")
-        pid_ids=("${pid_ids[@]}")
+        # Compact arrays (use expansion guard to avoid unbound variable with set -u)
+        pids=("${pids[@]+"${pids[@]}"}")
+        pid_ids=("${pid_ids[@]+"${pid_ids[@]}"}")
         sleep 1
       done
 
@@ -642,8 +646,8 @@ main() {
       running=$((running + 1))
     done
 
-    # Wait for remaining workers
-    for pid in "${pids[@]}"; do
+    # Wait for remaining workers (guard against empty array with set -u)
+    for pid in "${pids[@]+"${pids[@]}"}"; do
       wait "$pid" 2>/dev/null || true
     done
   fi
