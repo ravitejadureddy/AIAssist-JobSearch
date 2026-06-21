@@ -45,7 +45,7 @@ const coverLetterJobs = new Map(); // num → { status: 'generating'|'ready'|'er
 
 // PDF backfill — auto-started on server startup, tracks progress via SSE
 let pdfBackfillProc  = null;
-let pdfBackfillStats = { total: 0, done: 0, failed: 0, running: false };
+let pdfBackfillStats = { total: 0, done: 0, failed: 0, running: false, pass: 0 };
 
 // SSE clients for server → browser shutdown signal
 const sseClients = new Set();
@@ -62,6 +62,17 @@ function broadcastSSE(obj) {
 }
 
 // ─── Parsers ──────────────────────────────────────────────────────────────────
+
+function businessDayCutoff(n = 3) {
+  const d = new Date();
+  let bizDaysFound = 0;
+  while (true) {
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) { bizDaysFound++; if (bizDaysFound >= n) break; }
+    d.setDate(d.getDate() - 1);
+  }
+  return d.toISOString().slice(0, 10);
+}
 
 function parseScore(s) {
   if (!s) return null;
@@ -173,53 +184,58 @@ function parseApplications() {
 
 // ─── PDF backfill — count missing + spawn generate-missing-pdfs.mjs ──────────
 
-function countMissingQueuePdfs() {
+function countMissingQueuePdfs(cutoffDate) {
   const apps = parseApplications();
   return apps.filter(a => {
     if (a.status !== 'Evaluated' || !a.scoreVal || a.scoreVal < 3.5) return false;
+    if (cutoffDate && a.date && a.date < cutoffDate) return false;
     const folder = findOutputFolder(a.num, a.reportPath);
     return !folder || !existsSync(join(folder, 'resume.pdf'));
   }).length;
 }
 
 function startPdfBackfill() {
-  if (pdfBackfillProc) return; // already running
-  const missing = countMissingQueuePdfs();
-  if (missing === 0) { console.log('[pdf-backfill] All Apply Queue PDFs present.'); return; }
+  if (pdfBackfillProc) return;
+  const cutoff = businessDayCutoff(3);
+  const missing = countMissingQueuePdfs(cutoff);
+  if (missing === 0) { console.log(`[pdf-backfill] All Apply Queue PDFs present (cutoff ${cutoff}).`); return; }
 
-  pdfBackfillStats = { total: missing, done: 0, failed: 0, running: true };
+  pdfBackfillStats = { total: missing, done: 0, failed: 0, running: true, pass: 1 };
   broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats });
-  console.log(`[pdf-backfill] Auto-starting: ${missing} missing PDFs in Apply Queue`);
+  console.log(`[pdf-backfill] Auto-starting: ${missing} missing PDFs · cutoff ${cutoff}`);
 
-  const child = spawn('node', [join(CAREER_OPS, 'generate-missing-pdfs.mjs'), '--queue-only'], {
-    cwd: CAREER_OPS,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env },
-  });
-  pdfBackfillProc = child;
+  function spawnPass(extraArgs, onDone) {
+    const child = spawn('node', [
+      join(CAREER_OPS, 'generate-missing-pdfs.mjs'),
+      '--queue-only', '--since', cutoff, ...extraArgs
+    ], { cwd: CAREER_OPS, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+    pdfBackfillProc = child;
 
-  let buf = '';
-  child.stdout.on('data', d => {
-    buf += d.toString();
-    const lines = buf.split('\n');
-    buf = lines.pop() || '';
-    for (const line of lines) {
-      if (line.includes('✅')) { pdfBackfillStats.done++;   broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats }); }
-      else if (line.includes('❌')) { pdfBackfillStats.failed++; broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats }); }
-    }
-  });
+    let buf = '';
+    child.stdout.on('data', d => {
+      buf += d.toString();
+      const lines = buf.split('\n'); buf = lines.pop() || '';
+      for (const line of lines) {
+        if (line.includes('✅')) { pdfBackfillStats.done++; broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats }); }
+        else if (line.includes('❌')) { pdfBackfillStats.failed++; broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats }); }
+      }
+    });
+    // Always drain stderr to prevent pipe buffer fill → server event loop stall
+    child.stderr.on('data', d => { const t = d.toString().trim(); if (t) console.warn('[pdf-backfill]', t.slice(0, 300)); });
+    child.on('close', () => { pdfBackfillProc = null; onDone(); });
+    child.on('error', err => { pdfBackfillProc = null; console.warn('[pdf-backfill] spawn error:', err.message); onDone(); });
+  }
 
-  child.on('close', () => {
-    pdfBackfillProc = null;
-    pdfBackfillStats.running = false;
+  // Pass 1: HTML→PDF only (zero tokens, fast)
+  spawnPass(['--html-only-pdf'], () => {
+    pdfBackfillStats.pass = 2;
     broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats });
-    console.log(`[pdf-backfill] Complete: ${pdfBackfillStats.done} generated, ${pdfBackfillStats.failed} failed.`);
-  });
-
-  child.on('error', err => {
-    pdfBackfillProc = null;
-    pdfBackfillStats.running = false;
-    console.warn('[pdf-backfill] Spawn error:', err.message);
+    // Pass 2: generate HTML for remaining jobs (requires claude -p)
+    spawnPass([], () => {
+      pdfBackfillStats.running = false;
+      broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats });
+      console.log(`[pdf-backfill] Complete: ${pdfBackfillStats.done} generated, ${pdfBackfillStats.failed} failed.`);
+    });
   });
 }
 
@@ -754,11 +770,13 @@ function tabBar(mode, queueCount, historyCount, pendingCount) {
 function renderDashboard(apps, mode, pendingCount) {
   const isQueue = mode === 'queue' || mode === 'queue';
 
+  const cutoff = isQueue ? businessDayCutoff(3) : null;
   const filtered = apps
     .filter(a => {
       if (a.status === 'SKIP' || a.status === 'Discarded') return false;
       if (a.scoreVal === null || a.scoreVal < 3.5) return false;
       if (isQueue && a.status !== 'Evaluated') return false;
+      if (cutoff && a.date && a.date < cutoff) return false;
       return true;
     })
     .sort((a, b) => b.date.localeCompare(a.date) || b.scoreVal - a.scoreVal);
@@ -788,7 +806,7 @@ function renderDashboard(apps, mode, pendingCount) {
 
   const title = isQueue ? 'Apply Queue' : 'Full History ≥ 3.5';
   const subTitle = isQueue
-    ? `${filtered.length} jobs to apply · Evaluated · Score ≥ 3.5`
+    ? `${filtered.length} jobs to apply · Last 3 business days · Score ≥ 3.5 · from ${cutoff}`
     : `${filtered.length} jobs · All active statuses · Score ≥ 3.5`;
 
   const rows = filtered.map(a => {
@@ -797,7 +815,7 @@ function renderDashboard(apps, mode, pendingCount) {
 
     const jobLink = a.jobUrl
       ? `<a href="${esc(a.jobUrl)}" target="_blank" class="icon-link" title="${esc(a.jobUrl)}">🔗</a>`
-      : `<span style="color:#334155">—</span>`;
+      : `<span style="color:#f59e0b;font-size:0.75em" title="No URL in report — run resolve-linkedin-urls or edit report manually">⚠️ No URL</span>`;
 
     const tierColor = a.resumeTier === 'tailored' ? '#22c55e' : a.resumeTier === 'archetype' ? '#f59e0b' : '#64748b';
     const tierLabel = a.resumeTier === 'tailored' ? '★' : a.resumeSource || 'generic';
@@ -813,9 +831,11 @@ function renderDashboard(apps, mode, pendingCount) {
         : join(CAREER_OPS, 'Resume', 'generic');
     const folderBtn = `<span class="icon-link" onclick="openFolder(this,'${esc(folderTarget)}')" title="${esc(tierTitle)}">📁</span><span style="font-size:0.7em;color:${tierColor};margin-left:2px" title="${esc(tierTitle)}">${esc(tierLabel)}</span>`;
 
-    const reportLink = a.reportPath
+    const reportFull = a.reportPath ? resolveReportPath(a.reportPath) : null;
+    const reportOnDisk = reportFull && existsSync(reportFull);
+    const reportLink = reportOnDisk
       ? `<a href="/report?path=${encodeURIComponent(a.reportPath)}" target="_blank" class="icon-link" title="View evaluation report">📄</a>`
-      : `<span style="color:#334155">—</span>`;
+      : `<span style="color:#f59e0b;font-size:0.75em" title="${a.reportPath ? 'Report file missing on disk' : 'No report linked in tracker'}">⚠️ Missing</span>`;
 
     const h1bTitle = a.h1b?.label === 'High'         ? 'Strong H-1B sponsor — 50+ LCA filings on record'
       : a.h1b?.label === 'Medium'       ? 'Likely H-1B sponsor — 10–49 LCA filings on record'
@@ -826,11 +846,11 @@ function renderDashboard(apps, mode, pendingCount) {
       : 'H-1B status unknown';
     const h1bCell = a.h1b
       ? `<span class="badge" style="background:${a.h1b.color};font-size:0.75em" title="${esc(h1bTitle)}">${a.h1b.label}</span>`
-      : `<span style="color:#334155">—</span>`;
+      : `<span class="badge" style="background:#374151;font-size:0.75em" title="H1B status not checked — verify manually on h1bdata.info">?</span>`;
 
     const salaryCell = a.salary
       ? `<span style="font-size:0.82em;color:#94a3b8;white-space:nowrap">${esc(a.salary)}</span>`
-      : `<span style="color:#334155">—</span>`;
+      : `<span style="font-size:0.78em;color:#64748b">Unlisted</span>`;
 
     const fillSt = readApplyStatus(a.num);
     const fillStatusBadge = fillSt ? (() => {
@@ -1037,7 +1057,8 @@ function openFill(num, jobUrl) {
           content ? content.insertAdjacentElement('beforebegin', banner) : document.body.prepend(banner);
         }
         if (d.running) {
-          banner.innerHTML = \`⏳ Generating missing resumes… <strong>\${d.done}/\${d.total}</strong> done\${d.failed > 0 ? \` · \${d.failed} failed\` : ''}\`;
+          const passInfo = d.pass ? \` · Pass \${d.pass}/2\` : '';
+          banner.innerHTML = \`⏳ Generating missing resumes… <strong>\${d.done}/\${d.total}</strong> done\${d.failed > 0 ? \` · \${d.failed} failed\` : ''}\${passInfo}\`;
         } else {
           banner.innerHTML = \`✅ Resumes ready: <strong>\${d.done}</strong> generated\${d.failed > 0 ? \` · \${d.failed} failed\` : ''}  — reloading…\`;
           setTimeout(() => location.reload(), 2000);
@@ -1047,13 +1068,6 @@ function openFill(num, jobUrl) {
   };
 })();
 
-// Auto-trigger PDF backfill on page load if queue jobs are missing resumes
-(function() {
-  fetch('/api/pdf-backfill').then(r => r.json()).then(d => {
-    if (d.stats.running) return; // already in progress — SSE will update banner
-    if (d.missing > 0) fetch('/api/pdf-backfill', { method: 'POST' }).catch(() => {});
-  }).catch(() => {});
-})();
 
 function applyJob(el, num) {
   el.disabled = true;
@@ -1824,9 +1838,9 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: true, stats: pdfBackfillStats }));
       return;
     }
-    // GET — return current status + missing count
+    // GET — return current status + missing count (scoped to 3-day window)
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ missing: countMissingQueuePdfs(), stats: pdfBackfillStats }));
+    res.end(JSON.stringify({ missing: countMissingQueuePdfs(businessDayCutoff(3)), stats: pdfBackfillStats }));
     return;
   }
 

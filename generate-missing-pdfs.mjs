@@ -36,18 +36,21 @@ const TRACKER_FILE = join(CAREER_OPS, 'data', 'applications.md');
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
-const DRY_RUN    = args.includes('--dry-run');
-const QUEUE_ONLY = args.includes('--queue-only');
-const numIdx     = args.indexOf('--num');
-const numArg     = numIdx >= 0 ? args[numIdx + 1] : null;
-const limitIdx   = args.indexOf('--limit');
-const limitArg   = limitIdx >= 0 ? args[limitIdx + 1] : null;
-const scoreIdx   = args.indexOf('--min-score');
-const scoreArg   = scoreIdx >= 0 ? args[scoreIdx + 1] : null;
-const LIMIT      = limitArg ? parseInt(limitArg) : Infinity;
+const DRY_RUN      = args.includes('--dry-run');
+const QUEUE_ONLY   = args.includes('--queue-only');
+const HTML_ONLY_PDF = args.includes('--html-only-pdf'); // Pass 1: Playwright-only (no Claude tokens)
+const numIdx       = args.indexOf('--num');
+const numArg       = numIdx >= 0 ? args[numIdx + 1] : null;
+const limitIdx     = args.indexOf('--limit');
+const limitArg     = limitIdx >= 0 ? args[limitIdx + 1] : null;
+const scoreIdx     = args.indexOf('--min-score');
+const scoreArg     = scoreIdx >= 0 ? args[scoreIdx + 1] : null;
+const sinceIdx     = args.indexOf('--since');
+const SINCE        = sinceIdx >= 0 ? args[sinceIdx + 1] : null; // YYYY-MM-DD cutoff
+const LIMIT        = limitArg ? parseInt(limitArg) : Infinity;
 
-// ─── Report numbers in Apply Queue (Evaluated + score >= threshold) ───────────
-function applyQueueReportNums(threshold) {
+// ─── Report numbers in Apply Queue (Evaluated + score >= threshold + optional date) ──
+function applyQueueReportNums(threshold, since) {
   if (!existsSync(TRACKER_FILE)) return null;
   const nums = new Set();
   for (const line of readFileSync(TRACKER_FILE, 'utf-8').split('\n')) {
@@ -57,6 +60,9 @@ function applyQueueReportNums(threshold) {
     if (status !== 'Evaluated') continue;
     const scoreVal = parseFloat(cols[5]);
     if (isNaN(scoreVal) || scoreVal < threshold) continue;
+    // Date filter — cols[2] is the date column (YYYY-MM-DD)
+    const dateStr = cols[2];
+    if (since && dateStr && dateStr < since) continue;
     const m = cols[8]?.match(/\[(\d+)\]/);
     if (m) nums.add(m[1]);
   }
@@ -93,7 +99,7 @@ function findMissing() {
   if (!existsSync(REPORTS_DIR)) return [];
   const files = readdirSync(REPORTS_DIR).filter(f => f.endsWith('.md')).sort();
   const results = [];
-  const queueNums = QUEUE_ONLY ? applyQueueReportNums(THRESHOLD) : null;
+  const queueNums = QUEUE_ONLY ? applyQueueReportNums(THRESHOLD, SINCE) : null;
 
   for (const file of files) {
     if (numArg && !file.startsWith(numArg + '-')) continue;
@@ -122,6 +128,10 @@ function findMissing() {
     const reportNum = file.match(/^(\d+)/)?.[1];
     const outDir    = join(OUTPUT_DIR, `${reportNum}-${file.replace(/^\d+-/, '').replace(/-\d{4}-\d{2}-\d{2}\.md$/, '')}`);
     const htmlPath  = join(outDir, 'cv-tailored.html');
+    const hasHtml   = existsSync(htmlPath);
+
+    // Pass 1 (--html-only-pdf): only process jobs where HTML already exists
+    if (HTML_ONLY_PDF && !hasHtml) continue;
 
     results.push({
       file,
@@ -129,7 +139,7 @@ function findMissing() {
       reportNum,
       outPath,
       htmlPath,
-      hasHtml: existsSync(htmlPath), // HTML already generated — skip Sonnet, just run Playwright
+      hasHtml,
       score,
       url:     urlM?.[1]?.trim()  || '',
       company: coM?.[1]?.trim()   || file.replace(/^\d+-/, '').replace(/-\d{4}.*$/, ''),
@@ -139,6 +149,15 @@ function findMissing() {
 
     if (results.length >= LIMIT) break;
   }
+
+  // Sort by report date desc then score desc — matches dashboard display order
+  results.sort((a, b) => {
+    const dateA = a.file.match(/-(\d{4}-\d{2}-\d{2})\.md$/)?.[1] || '';
+    const dateB = b.file.match(/-(\d{4}-\d{2}-\d{2})\.md$/)?.[1] || '';
+    if (dateB !== dateA) return dateB.localeCompare(dateA);
+    return (b.score || 0) - (a.score || 0);
+  });
+
   return results;
 }
 

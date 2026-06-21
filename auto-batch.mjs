@@ -162,6 +162,68 @@ function playwrightPrefetch() {
   if (result.error) log('playwright-prefetch error:', result.error.message);
 }
 
+// ── Step 3b: Sync resolved LinkedIn URLs back into batch-input + batch-state ─
+// playwright-prefetch resolves LinkedIn → ATS URL but only writes to pipeline.md
+// and /tmp/batch-jd-{id}.txt. batch-input.tsv / batch-state.tsv still have the
+// original LinkedIn URLs, which then end up in evaluation reports. Sync them.
+function syncResolvedUrlsToBatchState() {
+  if (!existsSync(INPUT_FILE)) return;
+  const resolvedMap = new Map();
+
+  for (const line of readFileSync(INPUT_FILE, 'utf-8').split('\n')) {
+    const parts = line.split('\t');
+    if (!parts[0] || parts[0] === 'id' || !parts[1]) continue;
+    const id = parts[0].trim();
+    const url = parts[1].trim();
+    if (!url.includes('linkedin.com')) continue;
+    const tmpFile = `/tmp/batch-jd-${id}.txt`;
+    if (!existsSync(tmpFile)) continue;
+    try {
+      const content = readFileSync(tmpFile, 'utf-8');
+      const m = content.match(/^RESOLVED_APPLY_URL:\s*(.+)$/m);
+      if (!m) continue;
+      const resolvedUrl = m[1].trim();
+      if (resolvedUrl && resolvedUrl !== url) resolvedMap.set(id, resolvedUrl);
+    } catch {}
+  }
+
+  if (resolvedMap.size === 0) {
+    log('syncResolvedUrls: no LinkedIn URLs resolved');
+    return;
+  }
+  log(`syncResolvedUrls: rewriting ${resolvedMap.size} URLs in batch-input.tsv${existsSync(STATE_FILE) ? ' + batch-state.tsv' : ''}`);
+
+  const inputUpdated = readFileSync(INPUT_FILE, 'utf-8').split('\n').map(line => {
+    const parts = line.split('\t');
+    if (!parts[0] || parts[0] === 'id') return line;
+    const id = parts[0].trim();
+    if (resolvedMap.has(id)) { parts[1] = resolvedMap.get(id); return parts.join('\t'); }
+    return line;
+  }).join('\n');
+  writeFileSync(INPUT_FILE, inputUpdated);
+
+  if (!existsSync(STATE_FILE)) return;
+  const stateUpdated = readFileSync(STATE_FILE, 'utf-8').split('\n').map(line => {
+    const parts = line.split('\t');
+    if (!parts[0] || parts[0] === 'id') return line;
+    const id = parts[0].trim();
+    if (resolvedMap.has(id)) { parts[1] = resolvedMap.get(id); return parts.join('\t'); }
+    return line;
+  }).join('\n');
+  writeFileSync(STATE_FILE, stateUpdated);
+}
+
+// ── Step 5c: Resolve LinkedIn URLs in already-generated reports ──────────────
+// Pure Playwright — no Claude tokens. Safe to run after batch even if token
+// budget is exhausted.
+function resolveLinkedInReports() {
+  log('resolving LinkedIn URLs in Apply Queue reports (post-batch) …');
+  const result = spawnSync('node', ['resolve-linkedin-urls.mjs', '--limit', '50'], {
+    cwd: PROJECT_DIR, stdio: 'inherit', timeout: 8 * 60 * 1000,
+  });
+  if (result.error) log('resolve-linkedin-urls error:', result.error.message);
+}
+
 // ── Step 4: Run batch-runner.sh ──────────────────────────────────────────────
 function runBatch() {
   log('launching batch-runner.sh …');
@@ -705,12 +767,14 @@ function scheduleRetryFromRateLimitHint() {
   }
 
   log(`pending jobs detected (${newItems} new + ${resetCount} rate-limit resets) — starting batch`);
-  await runGate1();        // filter H1B + hard-reject keywords before spawning Claude workers
-  playwrightPrefetch();    // handles JS-blocked jobs that passed Gate 1
+  await runGate1();              // filter H1B + hard-reject keywords before spawning Claude workers
+  playwrightPrefetch();          // handles JS-blocked jobs that passed Gate 1
+  syncResolvedUrlsToBatchState();// Fix E: rewrite LinkedIn → resolved ATS URLs before evaluator workers run
   runBatch();
   scheduleRetryFromRateLimitHint(); // if session limit hit, schedule retry at reset time
   mergeTracker();
   dedupTracker();
+  resolveLinkedInReports();      // Fix D: backfill resolved URLs into reports (zero-token Playwright)
   verifyPipeline();
   markPipelineDone();
   // PDF backfill is handled by dashboard-server.mjs on startup (user session = valid OAuth).
