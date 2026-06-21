@@ -205,11 +205,18 @@ function startPdfBackfill() {
   console.log(`[pdf-backfill] Auto-starting: ${missing} missing PDFs · cutoff ${cutoff}`);
 
   function spawnPass(extraArgs, onDone) {
-    const child = spawn('node', [
+    // process.execPath is the absolute path of the running node binary.
+    // spawn('node', ...) breaks when PATH is empty (Mac .app/launchd context).
+    const child = spawn(process.execPath, [
       join(CAREER_OPS, 'generate-missing-pdfs.mjs'),
       '--queue-only', '--since', cutoff, ...extraArgs
     ], { cwd: CAREER_OPS, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
     pdfBackfillProc = child;
+
+    // One-shot guard: spawn errors fire both 'error' and 'close', so onDone
+    // would otherwise run twice and chain Pass 2 even after Pass 1 errored.
+    let finished = false;
+    const finish = () => { if (finished) return; finished = true; pdfBackfillProc = null; onDone(); };
 
     let buf = '';
     child.stdout.on('data', d => {
@@ -222,8 +229,8 @@ function startPdfBackfill() {
     });
     // Always drain stderr to prevent pipe buffer fill → server event loop stall
     child.stderr.on('data', d => { const t = d.toString().trim(); if (t) console.warn('[pdf-backfill]', t.slice(0, 300)); });
-    child.on('close', () => { pdfBackfillProc = null; onDone(); });
-    child.on('error', err => { pdfBackfillProc = null; console.warn('[pdf-backfill] spawn error:', err.message); onDone(); });
+    child.on('close', finish);
+    child.on('error', err => { console.warn('[pdf-backfill] spawn error:', err.message); finish(); });
   }
 
   // Pass 1: HTML→PDF only (zero tokens, fast)
@@ -482,7 +489,8 @@ p{margin:0 0 18px}
 
 Total letter body: 270-300 words. Write the file only — no commentary, no explanation.`;
 
-  const child = spawn('claude', ['-p', prompt], {
+  // Hard-coded absolute path — Mac .app / launchd ship an empty PATH.
+  const child = spawn('/usr/local/bin/claude', ['-p', prompt], {
     cwd: CAREER_OPS,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env },

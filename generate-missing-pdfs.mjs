@@ -165,7 +165,9 @@ function findMissing() {
 function regeneratePdfOnly(job) {
   return new Promise((resolve_) => {
     mkdirSync(dirname(job.outPath), { recursive: true });
-    const child = spawn('node', [join(CAREER_OPS, 'generate-pdf.mjs'), job.htmlPath, job.outPath], {
+    // process.execPath is the running node binary's absolute path — robust to
+    // launch contexts where PATH does not include /usr/local/bin (Mac .app, launchd).
+    const child = spawn(process.execPath, [join(CAREER_OPS, 'generate-pdf.mjs'), job.htmlPath, job.outPath], {
       cwd: CAREER_OPS,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
@@ -219,7 +221,7 @@ Write ONLY the complete HTML file. No explanation.
 
 ## Step 5 — Run this exact bash command to generate the PDF
 \`\`\`
-node ${join(CAREER_OPS, 'generate-pdf.mjs')} ${htmlPath} ${job.outPath}
+${process.execPath} ${join(CAREER_OPS, 'generate-pdf.mjs')} ${htmlPath} ${job.outPath}
 \`\`\`
 
 ## Step 6 — Verify the PDF was created
@@ -228,7 +230,9 @@ Run: ls -lh "${job.outPath}"
 If the file exists, print only: PDF_SUCCESS: ${job.outPath}
 If it does not exist, print only: PDF_FAILED: ${job.outPath}`;
 
-    const child = spawn('claude', ['-p', '--dangerously-skip-permissions', prompt], {
+    // Hard-coded absolute path — Mac .app / launchd contexts ship an empty PATH
+    // that lacks /usr/local/bin, so spawn('claude', ...) fails with ENOENT.
+    const child = spawn('/usr/local/bin/claude', ['-p', '--dangerously-skip-permissions', prompt], {
       cwd: CAREER_OPS,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
