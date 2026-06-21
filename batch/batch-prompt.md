@@ -407,7 +407,8 @@ Formato TSV (una sola línea, sin header, 9 columnas tab-separated):
    - `H-1B low (N LCAs)` — LCA count < 10
    - `H-1B friendly` — JD indica sponsorship pero sin LCA count
    - `No H-1B` — JD excluye sponsorship explícitamente
-   - `H-1B unverified` — estado de sponsorship desconocido
+   - `No H-1B (0 LCAs)` — 0 LCAs confirmados en h1bdata.info (default cuando Gate 1 confirma 0 filings)
+   - `H-1B unreachable` — error de red o proceso al consultar h1bdata.info; verificar manualmente
 
 2. **Comp tag** (una de las siguientes):
    - `$XK–$YK` — rango salarial (ej. `$160K–$190K`)

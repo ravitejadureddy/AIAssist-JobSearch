@@ -249,6 +249,90 @@ function markPipelineDone() {
 
 // ── Gate 1: H1B + keyword filter ─────────────────────────────────────────────
 
+// Canonical name aliases — maps job-portal names to h1bdata.info registered names.
+// Keyed by lowercase company name from pipeline notes.
+const COMPANY_ALIASES = {
+  'pwc':                              'PricewaterhouseCoopers',
+  'pricewaterhousecoopers':           'PricewaterhouseCoopers',
+  'bristol myers squibb':             'Bristol-Myers Squibb',
+  'block labs':                       'Block Inc',
+  'globalpoint':                      'GlobalPoint Inc',
+  'fanatics betting & gaming':        'Fanatics',
+  'dat freight & analytics':          'DAT Solutions',
+  'cursor':                           'Anysphere Inc',
+  'doma technology llc':              'Doma',
+  'doma technology':                  'Doma',
+  'healthpartners':                   'Health Partners',
+  'w talent (financial services)':    'Phaidon International',
+  'selby jennings / tier-1 tradi':    'Phaidon International',
+  'alignerr':                         'Labelbox',
+  'cerecore':                         'HCA Healthcare',
+  'appgate':                          'Cyxtera Technologies',
+  'appgate cybersecurity':            'Cyxtera Technologies',
+  'garan, incorporated':              'Garan Inc',
+  'turing it labs':                   'Turing IT',
+  "people's group":                   "People's",
+};
+
+// Known foreign companies (no US H-1B filing → always filter)
+const FOREIGN_COMPANY_NAMES = new Set([
+  'oxio corporation', 'rezdy', 'jobgether', 'intellias', 'qa ltd',
+  'sumup', 'epiroc', 'lightspeed', 'caa club group',
+]);
+
+// Named cap-exempt employers not caught by pattern matching
+const CAP_EXEMPT_NAMED = new Set([
+  'aclu', 'american civil liberties union',
+  'the nature conservancy',
+  'ut md anderson',
+  "st. luke's health system",
+]);
+
+// Anonymous / undisclosed employer patterns
+const ANONYMOUS_EMPLOYER_PATTERNS = [
+  /^(global|proprietary|anonymous|undisclosed)\s+(asset manager|trading firm|employer|company|fund)$/i,
+  /^chatgpt jobs$/i,
+  /not (disclosed|named)$/i,
+];
+
+function detectForeignOrAnonymous(company) {
+  const lower = company.toLowerCase().trim();
+  if (FOREIGN_COMPANY_NAMES.has(lower)) return `foreign: ${company}`;
+  if (ANONYMOUS_EMPLOYER_PATTERNS.some(p => p.test(lower))) return `anonymous: ${company}`;
+  return null;
+}
+
+function detectCapExemptNamed(company) {
+  return CAP_EXEMPT_NAMED.has(company.toLowerCase().trim());
+}
+
+// Strip safe legal suffixes and parenthetical abbreviations.
+// Only removes tokens that are unambiguous — does NOT strip "Group", "Technologies", etc.
+function safeNormalize(name) {
+  let n = name;
+  n = n.replace(/\s*\([^)]{1,10}\)$/, '').trim();
+  n = n.replace(/,?\s+(Inc\.?|LLC\.?|Ltd\.?|Corp\.?|Corporation|L\.?P\.?|L\.?L\.?C\.?|Incorporated|Limited|Co\.)$/i, '').trim();
+  n = n.replace(/\.$/, '').trim();
+  return n;
+}
+
+// Suffix variants tried in order when a company returns 0 LCAs.
+// The empty string (bare name) is tried first, then common suffixes.
+const SUFFIX_VARIANTS = [
+  '', ' Inc', ' Inc.', ' LLC', ' Ltd', ' Corp', ' Corporation',
+  ' Technologies', ' Technology', ' Solutions', ' Systems', ' Group',
+  ' Software', ' Services', ' Consulting',
+];
+
+async function trySuffixExpansion(baseName) {
+  for (const suffix of SUFFIX_VARIANTS) {
+    const candidate = (baseName + suffix).trim();
+    const count = await fetchLcaCount(candidate);
+    if (count > 0) return { count, foundAs: candidate };
+  }
+  return { count: 0, foundAs: null };
+}
+
 const HARD_REJECT_KEYWORDS = [
   'no visa sponsorship', 'will not sponsor', 'unable to sponsor', 'cannot sponsor',
   'sponsorship not available', 'us citizens only', 'us citizen only',
@@ -303,7 +387,7 @@ function updateH1bCache(slug, displayName, lcaCount) {
 async function fetchLcaCount(companyName) {
   const encoded = companyName.toLowerCase().replace(/\s+/g, '+');
   let total = 0;
-  for (const year of ['2026', '2025']) {
+  for (const year of ['2025', '2024']) {
     try {
       const res = await fetch(
         `https://h1bdata.info/index.php?em=${encoded}&job=&city=&year=${year}`,
@@ -411,6 +495,13 @@ async function runGate1() {
     const batch = await Promise.all(slice.map(async job => {
       const company = extractCompany(job.notes);
 
+      // Pre-check A: foreign / anonymous employers — filter without LCA lookup
+      const foreignOrAnon = detectForeignOrAnonymous(company);
+      if (foreignOrAnon) return { ...job, company, status: 'FILTER', lca: 0, reason: foreignOrAnon };
+
+      // Pre-check B: named cap-exempt employers (hospitals, known non-profits)
+      if (detectCapExemptNamed(company)) return { ...job, company, status: 'FILTER', lca: 0, reason: `cap-exempt: ${company}` };
+
       // Step A: fetch JD (save to /tmp for later phases)
       const jdText = await fetchJd(job.url, job.id);
 
@@ -424,21 +515,53 @@ async function runGate1() {
         const rejectedKw = detectHardReject(jdText);
         if (rejectedKw) return { ...job, company, status: 'FILTER', lca: 0, reason: `keyword: ${rejectedKw}` };
 
-        // Step B2: cap-exempt employer filter (universities, govt, non-profits)
+        // Step B2: cap-exempt employer filter (universities, govt, non-profits — pattern-based)
         const capExempt = detectCapExempt(company, jdText);
         if (capExempt) return { ...job, company, status: 'FILTER', lca: 0, reason: `cap-exempt: ${capExempt}` };
       }
 
-      // Step C: LCA check
+      // Step C: LCA check — aliases → normalization → suffix expansion
       const slug = toSlug(company);
-      const cached = cache.get(slug);
+
+      // Resolve canonical name via aliases table
+      const aliasName = COMPANY_ALIASES[company.toLowerCase()] || COMPANY_ALIASES[company];
+      const lookupName = aliasName || company;
+      const lookupSlug = toSlug(lookupName);
+
+      // Check cache for canonical slug first, then original slug
+      const cached = cache.get(lookupSlug) || (aliasName ? null : cache.get(slug));
       let lcaCount;
+      let searchedAs = lookupName;
+
       if (cached && isFresh(cached.last_checked)) {
         lcaCount = cached.total_lca;
       } else {
-        lcaCount = await fetchLcaCount(company);
-        updateH1bCache(slug, company, lcaCount);
-        cache.set(slug, { total_lca: lcaCount, last_checked: new Date().toISOString().slice(0, 10) });
+        // Try normalized name (strips ", Inc." / "(AWS)" etc.)
+        const normalizedName = safeNormalize(lookupName);
+        lcaCount = await fetchLcaCount(normalizedName);
+        searchedAs = normalizedName;
+
+        // If normalized returned 0 and it changed the name, also try the original
+        if (lcaCount === 0 && normalizedName !== lookupName) {
+          const rawCount = await fetchLcaCount(lookupName);
+          if (rawCount > 0) { lcaCount = rawCount; searchedAs = lookupName; }
+        }
+
+        // Still 0 and no alias found — try suffix variants (self-learning)
+        if (lcaCount === 0 && !aliasName) {
+          const expanded = await trySuffixExpansion(normalizedName);
+          if (expanded.count > 0) {
+            lcaCount = expanded.count;
+            searchedAs = expanded.foundAs;
+            // Auto-learn: persist alias for future Gate 1 runs this session
+            COMPANY_ALIASES[company.toLowerCase()] = expanded.foundAs;
+          }
+        }
+
+        // Write to cache using the slug of the name that actually returned results
+        const cacheSlug = toSlug(searchedAs !== lookupName ? searchedAs : lookupSlug);
+        updateH1bCache(cacheSlug, searchedAs, lcaCount);
+        cache.set(cacheSlug, { total_lca: lcaCount, last_checked: new Date().toISOString().slice(0, 10) });
       }
 
       // Step D: explicit sponsor override for low LCA
@@ -590,7 +713,8 @@ function scheduleRetryFromRateLimitHint() {
   dedupTracker();
   verifyPipeline();
   markPipelineDone();
-  scheduleQueuePdfs(); // detached — runs after this session exits, avoids nested claude -p
+  // PDF backfill is handled by dashboard-server.mjs on startup (user session = valid OAuth).
+  // scheduleQueuePdfs() was removed — it failed silently from launchd (no active claude session).
 
   log('=== auto-batch.mjs complete ===');
 })();

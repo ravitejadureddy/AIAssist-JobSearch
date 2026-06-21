@@ -43,6 +43,10 @@ const agentRetry = setInterval(async () => {
 // Cover letter generation — in-memory job tracker
 const coverLetterJobs = new Map(); // num → { status: 'generating'|'ready'|'error', outputFolder?, error? }
 
+// PDF backfill — auto-started on server startup, tracks progress via SSE
+let pdfBackfillProc  = null;
+let pdfBackfillStats = { total: 0, done: 0, failed: 0, running: false };
+
 // SSE clients for server → browser shutdown signal
 const sseClients = new Set();
 
@@ -167,6 +171,58 @@ function parseApplications() {
   return apps;
 }
 
+// ─── PDF backfill — count missing + spawn generate-missing-pdfs.mjs ──────────
+
+function countMissingQueuePdfs() {
+  const apps = parseApplications();
+  return apps.filter(a => {
+    if (a.status !== 'Evaluated' || !a.scoreVal || a.scoreVal < 3.5) return false;
+    const folder = findOutputFolder(a.num, a.reportPath);
+    return !folder || !existsSync(join(folder, 'resume.pdf'));
+  }).length;
+}
+
+function startPdfBackfill() {
+  if (pdfBackfillProc) return; // already running
+  const missing = countMissingQueuePdfs();
+  if (missing === 0) { console.log('[pdf-backfill] All Apply Queue PDFs present.'); return; }
+
+  pdfBackfillStats = { total: missing, done: 0, failed: 0, running: true };
+  broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats });
+  console.log(`[pdf-backfill] Auto-starting: ${missing} missing PDFs in Apply Queue`);
+
+  const child = spawn('node', [join(CAREER_OPS, 'generate-missing-pdfs.mjs'), '--queue-only'], {
+    cwd: CAREER_OPS,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env },
+  });
+  pdfBackfillProc = child;
+
+  let buf = '';
+  child.stdout.on('data', d => {
+    buf += d.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop() || '';
+    for (const line of lines) {
+      if (line.includes('✅')) { pdfBackfillStats.done++;   broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats }); }
+      else if (line.includes('❌')) { pdfBackfillStats.failed++; broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats }); }
+    }
+  });
+
+  child.on('close', () => {
+    pdfBackfillProc = null;
+    pdfBackfillStats.running = false;
+    broadcastSSE({ type: 'pdf_backfill', ...pdfBackfillStats });
+    console.log(`[pdf-backfill] Complete: ${pdfBackfillStats.done} generated, ${pdfBackfillStats.failed} failed.`);
+  });
+
+  child.on('error', err => {
+    pdfBackfillProc = null;
+    pdfBackfillStats.running = false;
+    console.warn('[pdf-backfill] Spawn error:', err.message);
+  });
+}
+
 // ─── Pipeline pending parser ──────────────────────────────────────────────────
 
 function parsePending() {
@@ -212,6 +268,12 @@ function parseH1B(notes) {
     if (lcaCount >= 10) return { label: 'Medium',       color: '#d97706' };
     if (lcaCount >= 1)  return { label: 'Low',          color: '#dc2626' };
     return              { label: 'No', color: '#374151' }; // 0 LCAs on record
+  }
+
+  // ── Unreachable — lookup failed with a network/process error ─────────────
+  if (lower.includes('h-1b unreachable') || lower.includes('h1b unreachable') ||
+      lower.includes('unreachable')) {
+    return { label: 'Unreachable', color: '#7c3aed' };
   }
 
   // ── Compact summary label written by evaluator ────────────────────────────
@@ -755,11 +817,12 @@ function renderDashboard(apps, mode, pendingCount) {
       ? `<a href="/report?path=${encodeURIComponent(a.reportPath)}" target="_blank" class="icon-link" title="View evaluation report">📄</a>`
       : `<span style="color:#334155">—</span>`;
 
-    const h1bTitle = a.h1b?.label === 'High'       ? 'Strong H-1B sponsor — 50+ LCA filings on record'
-      : a.h1b?.label === 'Medium'     ? 'Likely H-1B sponsor — 10–49 LCA filings on record'
-      : a.h1b?.label === 'Low'        ? 'Limited H-1B history — 1–9 LCA filings, verify before applying'
-      : a.h1b?.label === 'No'         ? '0 LCA filings on record — company likely does not sponsor H-1B'
-      : a.h1b?.label === 'Unverified' ? 'H-1B check ran with errors — verify manually on h1bdata.info'
+    const h1bTitle = a.h1b?.label === 'High'         ? 'Strong H-1B sponsor — 50+ LCA filings on record'
+      : a.h1b?.label === 'Medium'       ? 'Likely H-1B sponsor — 10–49 LCA filings on record'
+      : a.h1b?.label === 'Low'          ? 'Limited H-1B history — 1–9 LCA filings, verify before applying'
+      : a.h1b?.label === 'No'           ? '0 LCA filings on record — company likely does not sponsor H-1B'
+      : a.h1b?.label === 'Unverified'   ? 'H-1B check ran with errors — verify manually on h1bdata.info'
+      : a.h1b?.label === 'Unreachable'  ? 'H-1B lookup failed — verify manually on h1bdata.info'
       : 'H-1B status unknown';
     const h1bCell = a.h1b
       ? `<span class="badge" style="background:${a.h1b.color};font-size:0.75em" title="${esc(h1bTitle)}">${a.h1b.label}</span>`
@@ -950,23 +1013,46 @@ function openFill(num, jobUrl) {
   _es.onmessage = ev => {
     try {
       const d = JSON.parse(ev.data);
-      if (d.type !== 'agent') return;
-      if (d.status === 'connected') {
-        if (dot)   { dot.style.background = '#22c55e'; }
-        if (label) { label.style.color = '#86efac'; label.textContent = 'Fill Agent: Active'; }
-        // Remove launch button if present
-        badge?.querySelector('button')?.remove();
-      } else if (d.status === 'disconnected') {
-        if (dot)   { dot.style.background = '#475569'; }
-        if (label) { label.style.color = '#64748b'; label.textContent = 'Fill Agent: Off'; }
-      } else if (d.status === 'filling') {
-        if (label) label.textContent = \`Filling \${d.ats}…\`;
-      } else if (d.status === 'filled') {
-        if (label) label.textContent = \`Filled (\${d.outcome})\`;
-        setTimeout(() => { if (label) label.textContent = 'Fill Agent: Active'; }, 4000);
+      if (d.type === 'agent') {
+        if (d.status === 'connected') {
+          if (dot)   { dot.style.background = '#22c55e'; }
+          if (label) { label.style.color = '#86efac'; label.textContent = 'Fill Agent: Active'; }
+          badge?.querySelector('button')?.remove();
+        } else if (d.status === 'disconnected') {
+          if (dot)   { dot.style.background = '#475569'; }
+          if (label) { label.style.color = '#64748b'; label.textContent = 'Fill Agent: Off'; }
+        } else if (d.status === 'filling') {
+          if (label) label.textContent = \`Filling \${d.ats}…\`;
+        } else if (d.status === 'filled') {
+          if (label) label.textContent = \`Filled (\${d.outcome})\`;
+          setTimeout(() => { if (label) label.textContent = 'Fill Agent: Active'; }, 4000);
+        }
+      } else if (d.type === 'pdf_backfill') {
+        let banner = document.getElementById('pdf-backfill-banner');
+        if (!banner) {
+          banner = document.createElement('div');
+          banner.id = 'pdf-backfill-banner';
+          banner.style.cssText = 'background:#1e3a5f;color:#93c5fd;padding:7px 16px;font-size:0.8em;text-align:center;border-bottom:1px solid #2563eb';
+          const content = document.querySelector('.content');
+          content ? content.insertAdjacentElement('beforebegin', banner) : document.body.prepend(banner);
+        }
+        if (d.running) {
+          banner.innerHTML = \`⏳ Generating missing resumes… <strong>\${d.done}/\${d.total}</strong> done\${d.failed > 0 ? \` · \${d.failed} failed\` : ''}\`;
+        } else {
+          banner.innerHTML = \`✅ Resumes ready: <strong>\${d.done}</strong> generated\${d.failed > 0 ? \` · \${d.failed} failed\` : ''}  — reloading…\`;
+          setTimeout(() => location.reload(), 2000);
+        }
       }
     } catch {}
   };
+})();
+
+// Auto-trigger PDF backfill on page load if queue jobs are missing resumes
+(function() {
+  fetch('/api/pdf-backfill').then(r => r.json()).then(d => {
+    if (d.stats.running) return; // already in progress — SSE will update banner
+    if (d.missing > 0) fetch('/api/pdf-backfill', { method: 'POST' }).catch(() => {});
+  }).catch(() => {});
 })();
 
 function applyJob(el, num) {
@@ -1731,6 +1817,19 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === '/api/pdf-backfill') {
+    if (req.method === 'POST') {
+      startPdfBackfill();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, stats: pdfBackfillStats }));
+      return;
+    }
+    // GET — return current status + missing count
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ missing: countMissingQueuePdfs(), stats: pdfBackfillStats }));
+    return;
+  }
+
   if (url.pathname === '/events') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -1760,6 +1859,9 @@ server.listen(PORT, HOST, () => {
   const url = `http://${HOST}:${PORT}`;
   console.log(`Career Ops Dashboard → ${url}`);
   console.log('Press Ctrl+C to stop.\n');
+
+  // Auto-start PDF backfill after 10s (let fill-agent connect and Chrome settle first)
+  setTimeout(() => startPdfBackfill(), 10000);
 
   // Watchdog: shut down when the browser tab is closed (heartbeat stops)
   setTimeout(() => {
