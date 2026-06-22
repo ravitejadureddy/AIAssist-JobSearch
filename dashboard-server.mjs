@@ -1904,13 +1904,26 @@ server.listen(PORT, HOST, () => {
   // Auto-start PDF backfill after 10s (let fill-agent connect and Chrome settle first)
   setTimeout(() => startPdfBackfill(), 10000);
 
-  // Watchdog: shut down when the browser tab is closed (heartbeat stops)
+  // Watchdog: shut down when the browser tab is closed (heartbeat stops).
+  // Exception: if the PDF backfill is currently running, keep the server
+  // alive so it can finish — the user can close the tab and walk away.
+  // Normal shutdown resumes once backfill is done and pings still missing.
+  let backfillKeepAliveLogged = false;
   setTimeout(() => {
     setInterval(() => {
-      if (Date.now() - lastPing > PING_TIMEOUT_MS) {
-        console.log('Browser disconnected — shutting down.');
-        process.exit(0);
+      if (Date.now() - lastPing <= PING_TIMEOUT_MS) {
+        backfillKeepAliveLogged = false; // user is back, reset the log latch
+        return;
       }
+      if (pdfBackfillStats.running) {
+        if (!backfillKeepAliveLogged) {
+          console.log(`[heartbeat] browser gone but backfill running (${pdfBackfillStats.done}/${pdfBackfillStats.total}) — keeping server alive`);
+          backfillKeepAliveLogged = true;
+        }
+        return;
+      }
+      console.log('Browser disconnected — shutting down.');
+      process.exit(0);
     }, PING_INTERVAL_MS);
   }, GRACE_PERIOD_MS);
 });
