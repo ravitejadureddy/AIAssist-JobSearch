@@ -199,34 +199,33 @@ function generatePdf(job) {
     // Clear any stale JSON from a prior failed attempt so existence check is meaningful.
     if (existsSync(contentJsonPath)) { try { unlinkSync(contentJsonPath); } catch {} }
 
-    const prompt = `You are tailoring a CV for a job application. Produce a JSON file of tailored content. Do NOT write HTML — the script will fill the template deterministically.
+    const prompt = `You are tailoring a CV for a job application. Produce a JSON file of tailored content. Do NOT write HTML — the script fills the template deterministically.
 
 ## Step 1 — Read these files
 - CV (source of truth, never invent content not here): ${CV_FILE}
-- Candidate profile + formatting rules: ${PROFILE_MD}
+- Candidate profile + MANDATORY CV Format Standards: ${PROFILE_MD}
 - Evaluation report (job context): ${job.reportPath}
 
 ## Step 2 — Extract from the evaluation report
 - Company: ${job.company}
 - Role: ${job.role}
-- Top 6–8 keywords from the JD (look in Blocks A/B for "requirements" / "skills" / "must-have")
+- Top 5-7 JD keywords (look in Blocks A/B for "requirements" / "skills" / "must-have")
 - Recommended archetype/framing (search for "archetype" line in report)
-- Gaps the report flagged (to address subtly or omit)
+- Gaps the report flagged (address subtly or omit)
 
 ## Step 3 — Write a JSON file at this EXACT path
 ${contentJsonPath}
 
-The JSON MUST match this schema. Keys and types are strict:
+The JSON MUST match this schema exactly:
 
 {
   "summary": "3-4 sentences. Weave 3-5 JD keywords in naturally. No inventions.",
-  "competencies": ["6 to 8 short keyword phrases drawn from JD that candidate can demonstrate per cv.md"],
   "experience": [
     {
       "company": "Employer name (optionally · subtitle)",
       "period": "May 2022 – May 2026",
       "role": "Job title",
-      "bullets": ["bullet text — may include <strong>keyword</strong> for emphasis"]
+      "bullets": ["bullet text — <strong>keyword</strong> permitted for emphasis"]
     }
   ],
   "projects": [],
@@ -239,18 +238,49 @@ The JSON MUST match this schema. Keys and types are strict:
   ]
 }
 
-## Content rules
-- All text comes from cv.md. NEVER invent metrics, tools, employers, projects, or dates.
-- Reorder bullets within each job by JD relevance (most relevant first).
-- Reorder items within each skill category by JD relevance.
-- For the most recent employer (Innovaccer), keep 5-7 bullets. Older roles 3-5 each.
-- If cv.md has no Projects section, set "projects": [].
-- If cv.md has no Certifications, set "certifications": [].
-- Education must follow modes/_profile.md formatting rules (date format etc.).
-- Use <strong>…</strong> sparingly inside bullets to highlight JD-matched keywords (optional).
+## MANDATORY rules from modes/_profile.md "CV Format Standards"
+These are validated. JSON that violates them will produce a bad PDF.
+
+### Skills (8 categories, exact order — no JD-based reorder):
+1. Languages — Python, SQL, PySpark (ALWAYS first, no exception)
+2. Data Platform — Snowflake, dbt, data modeling, incremental pipelines
+3. Orchestration — Airflow, Kubernetes, Jenkins, CI/CD for data pipelines
+4. Streaming — Kafka, ETL/ELT at scale
+5. Cloud & Storage — AWS (S3, EC2, RDS), PostgreSQL, MongoDB
+6. Search & Observability — Elasticsearch, Kibana, data quality monitoring, pipeline observability
+7. BI & Reporting — Power BI, Tableau
+8. Dev Tools — GitLab, VSCode, Linux
+
+Exception: ONLY for healthcare-specific JDs (HL7/FHIR/EDI in the JD), a "Healthcare Data" category may appear first. For all other roles Languages is first. Within each category, you may reorder items by JD relevance — but do NOT reorder categories.
+
+### Per-employer bullet counts (HARD requirements):
+- Innovaccer Inc. (primary role): 6-7 bullets — NEVER trim below 6
+- Optum (UnitedHealth Group): 4-5 bullets — use all 5 standard bullets from cv.md
+- Deloitte Consulting: EXACTLY 2 bullets
+- Accenture: EXACTLY 2 bullets
+
+Bullets are reordered within each job by JD relevance (most relevant first), never reduced below these minimums.
+
+### Education date format:
+ALWAYS full ranges with en-dash (–), e.g. "Aug 2018 – Dec 2019" and "Aug 2012 – Jun 2016". Never bare year.
+
+### Other rules:
+- All text from cv.md. NEVER invent metrics, tools, employers, dates, or skills.
+- Projects: cv.md has none → "projects": []
+- Certifications: cv.md has none → "certifications": []
+- <strong>…</strong> permitted sparingly inside bullets/summary to highlight JD-matched keywords.
+
+## Validation checklist (verify before writing the file)
+- [ ] skills[0].category === "Languages" (or "Healthcare Data" only if JD is HL7/FHIR/EDI healthcare)
+- [ ] skills array has 8 categories in the documented order
+- [ ] experience[0].company contains "Innovaccer" and has 6+ bullets
+- [ ] Optum entry has 4+ bullets
+- [ ] Deloitte entry has exactly 2 bullets
+- [ ] Accenture entry has exactly 2 bullets
+- [ ] Education entries use full "Mon Year – Mon Year" with en-dash
 
 ## Step 4 — Write the JSON file and verify
-After writing the JSON, run: ls -lh "${contentJsonPath}"
+After writing, run: ls -lh "${contentJsonPath}"
 If the file exists, print only: JSON_SUCCESS
 If it does not exist, print only: JSON_FAILED
 

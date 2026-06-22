@@ -126,17 +126,10 @@ async function generatePDF() {
   // Read HTML to inject font paths as absolute file:// URLs
   let html = await readFile(inputPath, 'utf-8');
 
-  // Resolve font paths relative to career-ops/fonts/
-  const fontsDir = resolve(__dirname, 'fonts');
-  html = html.replace(
-    /url\(['"]?\.\/fonts\//g,
-    `url('file://${fontsDir}/`
-  );
-  // Close any unclosed quotes from the replacement (handles all font formats)
-  html = html.replace(
-    /file:\/\/([^'")]+)\.(woff2?|ttf|otf)['"]?\)/g,
-    `file://$1.$2')`
-  );
+  // The active template uses system font stack ('Helvetica Neue', Helvetica,
+  // Arial, sans-serif) — no @font-face declarations to resolve. The
+  // template-original.html (cyan/purple variant) referenced ./fonts/*.woff2,
+  // but that template is preserved as backup, not used by the active flow.
 
   // Normalize text for ATS compatibility (issue #1)
   const normalized = normalizeTextForATS(html);

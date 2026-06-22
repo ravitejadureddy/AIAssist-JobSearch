@@ -131,37 +131,44 @@ export function buildCertificationsHtml(items) {
     </div>`).join('\n');
 }
 
+// Inline skills format per modes/_profile.md CV Format Standards:
+//   <div class="skills-block">
+//     <strong>Languages:</strong> Python (advanced), SQL (advanced), PySpark<br>
+//     <strong>Data Platform:</strong> Snowflake, dbt, ...<br>
+//   </div>
+// First category must be "Languages" (or "Healthcare Data" for healthcare roles).
 export function buildSkillsHtml(categories) {
   if (!Array.isArray(categories) || categories.length === 0) return '';
-  const items = categories.map(cat => {
+  const lines = categories.map((cat, i) => {
     const itemList = Array.isArray(cat.items) ? cat.items.join(', ') : String(cat.items || '');
-    return `      <div class="skill-item"><strong>${esc(cat.category)}:</strong> ${esc(itemList)}</div>`;
+    const br = i < categories.length - 1 ? '<br>' : '';
+    return `      <strong>${esc(cat.category)}:</strong> ${esc(itemList)}${br}`;
   }).join('\n');
-  return `    <div class="skills-grid">\n${items}\n    </div>`;
+  return `    <div class="skills-block">\n${lines}\n    </div>`;
 }
 
-// ── drop an entire <!-- MARKER -->…<!-- NEXT --> block when content is empty ─
-function dropSection(template, marker, nextMarker) {
+// ── drop the entire <!-- KEY:START -->…<!-- KEY:END --> block when content is empty
+function dropSection(template, key) {
   const re = new RegExp(
-    `\\n?\\s*<!-- ${marker} -->[\\s\\S]*?(?=\\n\\s*<!-- ${nextMarker} -->)`
+    `\\n?\\s*<!-- ${key}:START -->[\\s\\S]*?<!-- ${key}:END -->\\n?`
   );
   return template.replace(re, '');
 }
 
 // ── contact-row conditional pruning (phone + portfolio may be empty) ─────────
+// Removes the field's <span> AND its following separator span, regardless of
+// the separator's literal content (e.g. " &nbsp;|&nbsp; " vs "|").
 function pruneContactRow(html, profile) {
   let out = html;
   if (!profile.phone) {
-    // <span>{{PHONE}}</span><span class="separator">|</span>
     out = out.replace(
-      /\s*<span>\{\{PHONE\}\}<\/span>\s*<span class="separator">\|<\/span>/,
+      /\s*<span>\{\{PHONE\}\}<\/span>\s*<span class="separator">[^<]*<\/span>/,
       ''
     );
   }
   if (!profile.portfolio) {
-    // <a href="{{PORTFOLIO_URL}}">…</a><span class="separator">|</span>
     out = out.replace(
-      /\s*<a href="\{\{PORTFOLIO_URL\}\}">\{\{PORTFOLIO_DISPLAY\}\}<\/a>\s*<span class="separator">\|<\/span>/,
+      /\s*<a href="\{\{PORTFOLIO_URL\}\}">\{\{PORTFOLIO_DISPLAY\}\}<\/a>\s*<span class="separator">[^<]*<\/span>/,
       ''
     );
   }
@@ -176,11 +183,13 @@ export function buildTailoredCv({ template, profile, content, format = 'letter',
 
   const pageWidth = format === 'a4' ? '210mm' : '8.5in';
 
-  // Defaults for section labels (English). Caller can override for i18n.
+  // Default section labels (English). Match Resume/<archetype>/ baselines:
+  // short, single-word where possible. CSS text-transform uppercases them.
+  // Caller can override for i18n.
   const L = {
-    SUMMARY:        'Professional Summary',
-    COMPETENCIES:   'Core Competencies',
-    EXPERIENCE:     'Professional Experience',
+    SUMMARY:        'Summary',
+    COMPETENCIES:   'Core Competencies', // unused in current template; kept for back-compat
+    EXPERIENCE:     'Experience',
     PROJECTS:       'Projects',
     EDUCATION:      'Education',
     CERTIFICATIONS: 'Certifications',
@@ -196,8 +205,8 @@ export function buildTailoredCv({ template, profile, content, format = 'letter',
   // 2. Drop optional sections (Projects, Certifications) if content empty
   const hasProjects = Array.isArray(content.projects) && content.projects.length > 0;
   const hasCerts    = Array.isArray(content.certifications) && content.certifications.length > 0;
-  if (!hasProjects) html = dropSection(html, 'PROJECTS', 'EDUCATION');
-  if (!hasCerts)    html = dropSection(html, 'CERTIFICATIONS', 'SKILLS');
+  if (!hasProjects) html = dropSection(html, 'PROJECTS');
+  if (!hasCerts)    html = dropSection(html, 'CERTIFICATIONS');
 
   // 3. Normalize linkedin / portfolio to a full URL (template uses bare host in display)
   const linkedinUrl = profile.linkedin
