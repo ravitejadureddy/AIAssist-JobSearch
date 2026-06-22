@@ -153,7 +153,7 @@ async function setupAnswerCapture(page, job) {
     try {
       const data = JSON.parse(readFileSync(ANSWERS_FILE, 'utf-8'));
       let added = 0;
-      for (const { label, value } of fields) {
+      for (const { label, value, _type } of fields) {
         if (!label || !value?.trim()) continue;
         const lbl = label.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim();
 
@@ -169,16 +169,26 @@ async function setupAnswerCapture(page, job) {
         );
         if (covered) continue;
 
+        // Persisted answer type. Hint from the page tells us if this was a
+        // dropdown / radio / yes-no; for free text we still classify by length
+        // to distinguish text vs textarea.
+        let persistType;
+        if      (_type === 'yesno')    persistType = 'yesno';
+        else if (_type === 'dropdown') persistType = 'dropdown_or_text';
+        else if (_type === 'radio')    persistType = 'radio_or_text';
+        else if (_type === 'textarea') persistType = 'textarea';
+        else persistType = value.trim().split(/\s+/).length > 10 ? 'textarea' : 'text';
+
         const id = lbl.replace(/\s+/g, '_').slice(0, 50);
         data.answers = data.answers || [];
         data.answers.push({
           id, patterns: [lbl], answer: value.trim(),
           answer_short: value.trim().length > 80 ? value.trim().slice(0, 77) + '…' : value.trim(),
-          type: value.trim().split(/\s+/).length > 10 ? 'textarea' : 'text',
+          type: persistType,
           _source: 'fill-agent',
         });
         added++;
-        console.log(`  [fill-agent] Saved: "${label}" → "${value.trim().slice(0, 60)}"`);
+        console.log(`  [fill-agent] Saved (${persistType}): "${label}" → "${value.trim().slice(0, 60)}"`);
       }
       if (added) writeFileSync(ANSWERS_FILE, JSON.stringify(data, null, 2));
     } catch (e) {
@@ -187,15 +197,108 @@ async function setupAnswerCapture(page, job) {
   }).catch(() => {}); // ignore if already exposed
 
   await page.evaluate(() => {
+    // Shared label discovery — finds the question label for any form field
+    // by walking up to the wrapper element (works for text, select, radios).
+    const labelFor = (el) => {
+      // Direct <label for="id"> binding
+      const direct = el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (direct) return direct.textContent;
+      // <fieldset><legend>…</legend>  — common for radio groups
+      const fs = el.closest('fieldset');
+      if (fs) {
+        const legend = fs.querySelector('legend');
+        if (legend) return legend.textContent;
+      }
+      // First label inside the wrapping field/container
+      const wrap = el.closest('[class*="wrapper"],[class*="field"],[class*="container"],[class*="question"],[role="group"]');
+      const lbl = wrap?.querySelector('label');
+      if (lbl) return lbl.textContent;
+      // aria-labelledby / aria-label / placeholder fallback
+      const labelledBy = el.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const ref = document.getElementById(labelledBy);
+        if (ref) return ref.textContent;
+      }
+      return el.getAttribute('aria-label') || el.placeholder || '';
+    };
+
+    const cleanLabel = (raw) => (raw || '').replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+
+    // Placeholder option detection for selects (skip "-- Select --", "Choose…", etc.)
+    const isPlaceholderOption = (text) =>
+      !text || /^[\s\-—•]*(select|choose|none|please|pick|--)/i.test(text.trim());
+
     const capture = () => {
       const fields = [];
+
+      // 1. Text inputs + textareas (unchanged behaviour)
       document.querySelectorAll('input[type="text"],input[type="tel"],input[type="email"],input[type="number"],input:not([type]),textarea').forEach(el => {
         if (!el.value?.trim()) return;
-        const labelEl = document.querySelector(`label[for="${el.id}"]`) ||
-          el.closest('[class*="wrapper"],[class*="field"],[class*="container"],[class*="question"]')?.querySelector('label');
-        const label = (labelEl?.textContent || el.getAttribute('aria-label') || el.placeholder || '').replace(/\*/g, '').trim();
-        if (label?.length > 2) fields.push({ label, value: el.value.trim() });
+        const label = cleanLabel(labelFor(el));
+        if (label?.length > 2) fields.push({ label, value: el.value.trim(), _type: el.tagName === 'TEXTAREA' ? 'textarea' : 'text' });
       });
+
+      // 2. Native <select> dropdowns — capture the human-readable text of the
+      //    selected option (not the underlying value, which is often a code).
+      document.querySelectorAll('select').forEach(el => {
+        if (el.disabled || !el.value || el.value === '') return;
+        const sel = el.options[el.selectedIndex];
+        if (!sel) return;
+        const optText = sel.textContent?.trim() || el.value;
+        if (isPlaceholderOption(optText)) return;
+        const label = cleanLabel(labelFor(el));
+        if (label?.length > 2) fields.push({ label, value: optText, _type: 'dropdown' });
+      });
+
+      // 3. Radio button groups — one entry per group (by name), use the
+      //    checked radio's own label text as the value.
+      const seenRadioGroups = new Set();
+      document.querySelectorAll('input[type="radio"]:checked').forEach(el => {
+        if (el.disabled) return;
+        const groupKey = el.name || el.getAttribute('aria-labelledby') || '';
+        if (groupKey && seenRadioGroups.has(groupKey)) return;
+        if (groupKey) seenRadioGroups.add(groupKey);
+
+        // Option label: <label>Yes</label> wrapping the input, or label[for=id],
+        // or the input's value attribute as last resort.
+        let optionText = '';
+        const wrapLabel = el.closest('label');
+        if (wrapLabel) {
+          // Clone the label, strip the input itself, then read remaining text
+          const clone = wrapLabel.cloneNode(true);
+          clone.querySelectorAll('input').forEach(n => n.remove());
+          optionText = clone.textContent?.trim() || '';
+        }
+        if (!optionText && el.id) {
+          optionText = document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent?.trim() || '';
+        }
+        if (!optionText) optionText = el.value || '';
+        if (!optionText) return;
+
+        // Question label: prefer fieldset/legend, then wrapper label that doesn't
+        // wrap the radio option itself.
+        let questionLabelEl = null;
+        const fs = el.closest('fieldset');
+        if (fs) questionLabelEl = fs.querySelector('legend');
+        if (!questionLabelEl) {
+          const wrap = el.closest('[class*="wrapper"],[class*="field"],[class*="container"],[class*="question"],[role="group"]');
+          if (wrap) {
+            for (const l of wrap.querySelectorAll('label')) {
+              if (l.contains(el)) continue; // skip the radio's own option label
+              questionLabelEl = l; break;
+            }
+          }
+        }
+        const label = cleanLabel(questionLabelEl?.textContent);
+        if (label?.length > 2) {
+          // Detect Yes/No radios — save with type 'yesno' so future filling
+          // matches the existing application_answers.json convention.
+          const ot = optionText.toLowerCase();
+          const _type = (ot === 'yes' || ot === 'no') ? 'yesno' : 'radio';
+          fields.push({ label, value: optionText, _type });
+        }
+      });
+
       if (window._coCapture) window._coCapture(fields);
     };
     document.querySelectorAll('button[type="submit"],input[type="submit"]').forEach(b => b.addEventListener('click', capture, { once: true }));
