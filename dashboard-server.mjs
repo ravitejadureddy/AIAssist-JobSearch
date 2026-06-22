@@ -789,7 +789,11 @@ function renderDashboard(apps, mode, pendingCount) {
     })
     .sort((a, b) => b.date.localeCompare(a.date) || b.scoreVal - a.scoreVal);
 
-  const queueCount = apps.filter(a => a.status === 'Evaluated' && a.scoreVal >= 3.5).length;
+  // Tab badge counts MUST match the rendered table:
+  // - Apply Queue: Evaluated + score ≥ 3.5 + last 3 business days (same as rendered)
+  // - History: all active statuses + score ≥ 3.5 (no date cutoff)
+  const queueCutoff = businessDayCutoff(3);
+  const queueCount = apps.filter(a => a.status === 'Evaluated' && a.scoreVal >= 3.5 && (!a.date || a.date >= queueCutoff)).length;
   const historyCount = apps.filter(a => !['SKIP','Discarded'].includes(a.status) && a.scoreVal >= 3.5).length;
 
   // Enrich with URL + output folder + resume tier for visible rows
@@ -1386,7 +1390,11 @@ function renderReport(rawPath) {
 }
 
 function renderPending(items, apps) {
-  const queueCount = apps.filter(a => a.status === 'Evaluated' && a.scoreVal >= 3.5).length;
+  // Tab badge counts MUST match the rendered table:
+  // - Apply Queue: Evaluated + score ≥ 3.5 + last 3 business days (same as rendered)
+  // - History: all active statuses + score ≥ 3.5 (no date cutoff)
+  const queueCutoff = businessDayCutoff(3);
+  const queueCount = apps.filter(a => a.status === 'Evaluated' && a.scoreVal >= 3.5 && (!a.date || a.date >= queueCutoff)).length;
   const historyCount = apps.filter(a => !['SKIP','Discarded'].includes(a.status) && a.scoreVal >= 3.5).length;
 
   function sourceColor(s) {
