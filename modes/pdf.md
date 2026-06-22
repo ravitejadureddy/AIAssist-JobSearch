@@ -1,5 +1,7 @@
 # Mode: pdf — ATS-Optimized PDF Generation
 
+> **Important — deterministic template fill.** Never write the HTML yourself. Produce a JSON of tailored content, then call `build-tailored-cv.mjs` to substitute it into `templates/cv-template.html` byte-for-byte. The template owns the layout, fonts, colors, gradient, and spacing — that contract guarantees every tailored PDF is visually identical to the generic resume.
+
 ## Full pipeline
 
 1. Read `cv.md` as the source of truth
@@ -10,21 +12,57 @@
    - US/Canada → `letter`
    - Rest of the world → `a4`
 6. Detect role archetype → adapt framing
-7. Rewrite Professional Summary by injecting JD keywords + exit narrative bridge ("Built and sold a business. Now applying systems thinking to [JD domain].")
-8. Select top 3-4 most relevant projects for the job
+7. Rewrite Professional Summary by injecting JD keywords + exit narrative bridge (when applicable to the candidate per `modes/_profile.md`)
+8. Select top 3-4 most relevant projects for the job (omit the section if `cv.md` has no Projects)
 9. Reorder experience bullets by JD relevance
 10. Build competency grid from JD requirements (6-8 keyword phrases)
 11. Inject keywords naturally into existing achievements (NEVER invent)
-12. Generate full HTML from template + personalized content
-13. Read `name` from `config/profile.yml` → normalize to kebab-case lowercase (e.g. "John Doe" → "john-doe") → `{candidate}`
-14. Write HTML to `/tmp/cv-{candidate}-{company}.html`
-15. Determine output folder and path:
+12. Build the JSON content object (see [Content JSON schema](#content-json-schema) below)
+13. Determine output folder:
     - If `report_num` is already known from the current session (e.g. from a prior evaluation step) → use `{report_num}-{slug}`
     - Else grep `data/applications.md` for this company+role, extract the report link number → use that as `{report_num}`
     - Fallback (no tracker entry): use `pdf-{slug}-{YYYY-MM-DD}` as the folder name
     - `mkdir -p output/{report_num}-{slug}`
-    - `node generate-pdf.mjs /tmp/cv-{candidate}-{company}.html output/{report_num}-{slug}/resume.pdf --format={letter|a4}`
+14. Write the JSON content to `output/{report_num}-{slug}/cv-content.json`
+15. Run two commands in sequence:
+    - `node build-tailored-cv.mjs output/{report_num}-{slug}/cv-content.json output/{report_num}-{slug}/cv-tailored.html --format={letter|a4} --lang={en|es}`
+    - `node generate-pdf.mjs output/{report_num}-{slug}/cv-tailored.html output/{report_num}-{slug}/resume.pdf --format={letter|a4}`
 16. Report: `output/{report_num}-{slug}/resume.pdf`, number of pages, keyword coverage %
+
+## Content JSON schema
+
+`build-tailored-cv.mjs` expects this exact shape. Keys are strict; missing required keys produce an empty section.
+
+```json
+{
+  "summary": "3-4 sentences. Weave 3-5 JD keywords naturally. No inventions.",
+  "competencies": ["6-8 short keyword phrases from JD that candidate can demonstrate per cv.md"],
+  "experience": [
+    {
+      "company": "Employer (optionally · subtitle)",
+      "period": "May 2022 – May 2026",
+      "role": "Job title",
+      "bullets": ["bullet text — may include <strong>keyword</strong> emphasis"]
+    }
+  ],
+  "projects": [
+    { "title": "…", "badge": "Optional badge", "desc": "…", "tech": "…" }
+  ],
+  "education": [
+    { "title": "Degree", "org": "Institution", "year": "Aug 2018 – Dec 2019", "desc": "" }
+  ],
+  "certifications": [
+    { "title": "Cert name", "org": "Issuer", "year": "2024" }
+  ],
+  "skills": [
+    { "category": "Languages", "items": ["Python (advanced)", "SQL (advanced)"] }
+  ]
+}
+```
+
+- For sections with no content in `cv.md`, set the value to an empty array (`"projects": []`, `"certifications": []`). The script removes the section block entirely.
+- Static fields — name, email, phone, LinkedIn, portfolio, location — come from `config/profile.yml` automatically; do not include them in the JSON.
+- Section labels ("Professional Summary", "Technical Skills", etc.) are filled by the script; do not include them.
 
 ## ATS Rules (clean parsing)
 
@@ -66,36 +104,16 @@ Examples of legitimate reformulation:
 
 **NEVER add skills that the candidate does not have. Only reword real experience using the exact JD vocabulary.**
 
-## Template HTML
+## Template ownership (do not write HTML)
 
-Use the template in `cv-template.html`. Replace the `{{...}}` placeholders with personalized content:
+The on-disk template `templates/cv-template.html` is the single source of truth for layout, fonts, colors, gradient, spacing, and CSS. `build-tailored-cv.mjs` fills its `{{PLACEHOLDER}}` slots from:
 
-| Placeholder | Content |
-|-------------|-----------|
-| `{{LANG}}` | `en` or `es` |
-| `{{PAGE_WIDTH}}` | `8.5in` (letter) or `210mm` (A4) |
-| `{{NAME}}` | (from profile.yml) |
-| `{{PHONE}}` | (from profile.yml — include with its separator only when `profile.yml` has a non-empty `phone` value; omit both `<span>` and `<span class="separator">` otherwise) |
-| `{{EMAIL}}` | (from profile.yml) |
-| `{{LINKEDIN_URL}}` | [from profile.yml] |
-| `{{LINKEDIN_DISPLAY}}` | [from profile.yml] |
-| `{{PORTFOLIO_URL}}` | [from profile.yml] (or /es depending on language) |
-| `{{PORTFOLIO_DISPLAY}}` | [from profile.yml] (or /es depending on language) |
-| `{{LOCATION}}` | [from profile.yml] |
-| `{{SECTION_SUMMARY}}` | Professional Summary |
-| `{{SUMMARY_TEXT}}` | Personalized summary with keywords |
-| `{{SECTION_COMPETENCIES}}` | Core Competencies |
-| `{{COMPETENCIES}}` | `<span class="competency-tag">keyword</span>` × 6-8 |
-| `{{SECTION_EXPERIENCE}}` | Work Experience |
-| `{{EXPERIENCE}}` | HTML for each job with reordered bullets |
-| `{{SECTION_PROJECTS}}` | Projects |
-| `{{PROJECTS}}` | HTML for top 3-4 projects |
-| `{{SECTION_EDUCATION}}` | Education |
-| `{{EDUCATION}}` | Education HTML |
-| `{{SECTION_CERTIFICATIONS}}` | Certifications |
-| `{{CERTIFICATIONS}}` | Certifications HTML |
-| `{{SECTION_SKILLS}}` | Skills |
-| `{{SKILLS}}` | Skills HTML |
+- **Static fields** (read from `config/profile.yml`): `NAME`, `EMAIL`, `PHONE`, `LINKEDIN_URL`, `LINKEDIN_DISPLAY`, `PORTFOLIO_URL`, `PORTFOLIO_DISPLAY`, `LOCATION`. Empty `phone` / `portfolio_url` cause the script to prune their `<span>` + adjacent separator from the contact row.
+- **Format fields** (CLI flags): `LANG` from `--lang`, `PAGE_WIDTH` from `--format` (`letter` → `8.5in`, `a4` → `210mm`).
+- **Section labels** (English defaults: "Professional Summary", "Core Competencies", "Professional Experience", "Projects", "Education", "Certifications", "Technical Skills"). Override via the `labels` arg when calling as a library; CLI uses English.
+- **Tailored content blocks**: `SUMMARY_TEXT`, `COMPETENCIES`, `EXPERIENCE`, `PROJECTS`, `EDUCATION`, `CERTIFICATIONS`, `SKILLS` — built deterministically from the JSON content object in the script using the template's exact class names. Inline `<strong>` / `<em>` / `<br>` are permitted in summary, bullets, project descriptions; everything else is HTML-escaped.
+
+If a tailored block needs a class or layout change, **edit `templates/cv-template.html`**. Do not invent classes inside the JSON — they will not have CSS and the rendered PDF will drift from the generic resume.
 
 ## Canva CV Generation (optional)
 

@@ -20,10 +20,11 @@
  *   node generate-missing-pdfs.mjs --min-score 4.0  # override threshold
  */
 
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, openSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, openSync, unlinkSync } from 'fs';
 import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
+import { buildTailoredCv, loadProfile } from './build-tailored-cv.mjs';
 
 const CAREER_OPS   = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR  = join(CAREER_OPS, 'reports');
@@ -183,55 +184,79 @@ function regeneratePdfOnly(job) {
   });
 }
 
-// ─── Generate one PDF via focused claude -p worker ───────────────────────────
+// ─── Generate one PDF via deterministic template-fill ────────────────────────
+// 1. Spawn claude -p to produce ONLY a JSON of tailored content (no HTML).
+// 2. Parse the JSON. Build cv-tailored.html via buildTailoredCv() — pure
+//    String.replace into templates/cv-template.html. Structure + CSS cannot drift.
+// 3. Spawn generate-pdf.mjs (Playwright Chrome) to render the final PDF.
 function generatePdf(job) {
   return new Promise((resolve_) => {
-    const outDir = dirname(job.outPath);
+    const outDir   = dirname(job.outPath);
     mkdirSync(outDir, { recursive: true });
-    const htmlPath = join(outDir, 'cv-tailored.html');
+    const htmlPath        = join(outDir, 'cv-tailored.html');
+    const contentJsonPath = join(outDir, 'cv-content.json');
 
-    const prompt = `You are generating a tailored ATS-optimized CV for a job application. Complete ALL steps in order.
+    // Clear any stale JSON from a prior failed attempt so existence check is meaningful.
+    if (existsSync(contentJsonPath)) { try { unlinkSync(contentJsonPath); } catch {} }
 
-## Step 1 — Read these files NOW (before doing anything else)
-- CV: ${CV_FILE}
-- CV HTML template: ${TEMPLATE}
-- Candidate profile/rules: ${PROFILE_MD}
-- Evaluation report: ${job.reportPath}
+    const prompt = `You are tailoring a CV for a job application. Produce a JSON file of tailored content. Do NOT write HTML — the script will fill the template deterministically.
+
+## Step 1 — Read these files
+- CV (source of truth, never invent content not here): ${CV_FILE}
+- Candidate profile + formatting rules: ${PROFILE_MD}
+- Evaluation report (job context): ${job.reportPath}
 
 ## Step 2 — Extract from the evaluation report
 - Company: ${job.company}
 - Role: ${job.role}
-- Top 5 required skills/keywords from the JD (look in Block A or B)
-- Any gaps the report flagged (to address or omit)
-- Archetype/framing recommended (look for archetype line in report)
+- Top 6–8 keywords from the JD (look in Blocks A/B for "requirements" / "skills" / "must-have")
+- Recommended archetype/framing (search for "archetype" line in report)
+- Gaps the report flagged (to address subtly or omit)
 
-## Step 3 — Generate the tailored HTML CV
-Rules:
-- Start from the HTML template exactly (cv-template.html). Do not invent a new layout.
-- Reorder skills section to put the most JD-relevant skills first (within each category).
-- In the Professional Summary, weave in the top 3 JD keywords naturally.
-- For Innovaccer bullets, lead with the proof points most relevant to this role.
-- Do NOT invent metrics, tools, or experience not in cv.md.
-- Follow ALL formatting rules in modes/_profile.md (skills order, bullet counts per employer, education date format).
+## Step 3 — Write a JSON file at this EXACT path
+${contentJsonPath}
 
-## Step 4 — Write the tailored HTML to this exact path
-${htmlPath}
+The JSON MUST match this schema. Keys and types are strict:
 
-Write ONLY the complete HTML file. No explanation.
+{
+  "summary": "3-4 sentences. Weave 3-5 JD keywords in naturally. No inventions.",
+  "competencies": ["6 to 8 short keyword phrases drawn from JD that candidate can demonstrate per cv.md"],
+  "experience": [
+    {
+      "company": "Employer name (optionally · subtitle)",
+      "period": "May 2022 – May 2026",
+      "role": "Job title",
+      "bullets": ["bullet text — may include <strong>keyword</strong> for emphasis"]
+    }
+  ],
+  "projects": [],
+  "education": [
+    { "title": "Degree", "org": "Institution", "year": "Aug 2018 – Dec 2019", "desc": "" }
+  ],
+  "certifications": [],
+  "skills": [
+    { "category": "Languages", "items": ["Python (advanced)", "SQL (advanced)", "PySpark"] }
+  ]
+}
 
-## Step 5 — Run this exact bash command to generate the PDF
-\`\`\`
-${process.execPath} ${join(CAREER_OPS, 'generate-pdf.mjs')} ${htmlPath} ${job.outPath}
-\`\`\`
+## Content rules
+- All text comes from cv.md. NEVER invent metrics, tools, employers, projects, or dates.
+- Reorder bullets within each job by JD relevance (most relevant first).
+- Reorder items within each skill category by JD relevance.
+- For the most recent employer (Innovaccer), keep 5-7 bullets. Older roles 3-5 each.
+- If cv.md has no Projects section, set "projects": [].
+- If cv.md has no Certifications, set "certifications": [].
+- Education must follow modes/_profile.md formatting rules (date format etc.).
+- Use <strong>…</strong> sparingly inside bullets to highlight JD-matched keywords (optional).
 
-## Step 6 — Verify the PDF was created
-Run: ls -lh "${job.outPath}"
+## Step 4 — Write the JSON file and verify
+After writing the JSON, run: ls -lh "${contentJsonPath}"
+If the file exists, print only: JSON_SUCCESS
+If it does not exist, print only: JSON_FAILED
 
-If the file exists, print only: PDF_SUCCESS: ${job.outPath}
-If it does not exist, print only: PDF_FAILED: ${job.outPath}`;
+Do NOT produce any HTML. Do NOT explain. The script fills the template.`;
 
-    // Hard-coded absolute path — Mac .app / launchd contexts ship an empty PATH
-    // that lacks /usr/local/bin, so spawn('claude', ...) fails with ENOENT.
+    // Hard-coded absolute path — Mac .app / launchd contexts ship an empty PATH.
     const child = spawn('/usr/local/bin/claude', ['-p', '--dangerously-skip-permissions', prompt], {
       cwd: CAREER_OPS,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -243,9 +268,44 @@ If it does not exist, print only: PDF_FAILED: ${job.outPath}`;
     child.stdout.on('data', d => { stdout += d.toString(); });
     child.stderr.on('data', d => { stderr += d.toString(); });
 
-    child.on('close', code => {
-      const success = existsSync(job.outPath);
-      resolve_({ success, stdout: stdout.trim(), stderr: stderr.trim(), code });
+    child.on('close', async (code) => {
+      if (!existsSync(contentJsonPath)) {
+        resolve_({ success: false, stdout: stdout.trim(), stderr: `cv-content.json not written by worker. claude stdout: ${stdout.slice(-300)}`, code });
+        return;
+      }
+
+      // Parse JSON content
+      let content;
+      try {
+        content = JSON.parse(readFileSync(contentJsonPath, 'utf-8'));
+      } catch (e) {
+        resolve_({ success: false, stdout: stdout.trim(), stderr: `JSON parse error: ${e.message}`, code });
+        return;
+      }
+
+      // Deterministic template fill — structure + CSS come from the template, byte-for-byte.
+      try {
+        const template = readFileSync(TEMPLATE, 'utf-8');
+        const profile  = loadProfile(PROFILE_YML);
+        const html     = buildTailoredCv({ template, profile, content, format: 'letter', lang: 'en' });
+        writeFileSync(htmlPath, html);
+      } catch (e) {
+        resolve_({ success: false, stdout: stdout.trim(), stderr: `Template fill failed: ${e.message}`, code });
+        return;
+      }
+
+      // Render PDF via Playwright (zero claude tokens for this step)
+      const pdfResult = await new Promise(r => {
+        const c = spawn(process.execPath, [join(CAREER_OPS, 'generate-pdf.mjs'), htmlPath, job.outPath, '--format=letter'], {
+          cwd: CAREER_OPS, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env },
+        });
+        let pErr = '';
+        c.stderr.on('data', d => { pErr += d.toString(); });
+        c.on('close', () => r({ success: existsSync(job.outPath), stderr: pErr.trim() }));
+        c.on('error', err => r({ success: false, stderr: err.message }));
+      });
+
+      resolve_({ success: pdfResult.success, stdout: stdout.trim(), stderr: pdfResult.stderr, code });
     });
 
     child.on('error', err => {
