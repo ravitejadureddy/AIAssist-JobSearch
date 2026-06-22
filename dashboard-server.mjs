@@ -1041,12 +1041,23 @@ function openFill(num, jobUrl) {
   const dot   = document.getElementById('agent-dot');
   const label = document.getElementById('agent-label');
   const badge = document.getElementById('agent-badge');
+  // Capture the agent's state at page-load time. If it was disconnected
+  // server-side (the "Launch Browser" button rendered), the action-column
+  // buttons were drawn as ⚡ Fill (smart-apply path). When the agent
+  // subsequently connects, those buttons are stale — reload to re-render.
+  const pageLoadedDisconnected = !!badge?.querySelector('button');
   const _es = window._agentES || (window._agentES = new EventSource('/events'));
   _es.onmessage = ev => {
     try {
       const d = JSON.parse(ev.data);
       if (d.type === 'agent') {
         if (d.status === 'connected') {
+          if (pageLoadedDisconnected) {
+            // First connection after a disconnected page-load — reload so the
+            // row buttons re-render with the Fill Agent variant (🌐 Open & Fill).
+            location.reload();
+            return;
+          }
           if (dot)   { dot.style.background = '#22c55e'; }
           if (label) { label.style.color = '#86efac'; label.textContent = 'Fill Agent: Active'; }
           badge?.querySelector('button')?.remove();
