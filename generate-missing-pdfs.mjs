@@ -64,8 +64,13 @@ function applyQueueReportNums(threshold, since) {
     // Date filter — cols[2] is the date column (YYYY-MM-DD)
     const dateStr = cols[2];
     if (since && dateStr && dateStr < since) continue;
-    const m = cols[8]?.match(/\[(\d+)\]/);
-    if (m) nums.add(m[1]);
+    // Extract the report number from the link TARGET (reports/NNN-…md), not
+    // from the bracketed display number. Tracker rows can drift after re-eval
+    // — display number stays stale, link target updates to the new file. The
+    // reports/ folder is iterated by file-number prefix downstream, so we need
+    // the file's number here.
+    const linkM = cols[8]?.match(/\((?:[^)]*\/)?(\d+)-[^)]*\.md\)/);
+    if (linkM) nums.add(linkM[1]);
   }
   return nums;
 }
