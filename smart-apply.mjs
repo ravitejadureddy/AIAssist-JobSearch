@@ -1151,11 +1151,11 @@ async function fillGeneric(page, job, answersData, resumePath) {
           catch { needsAnswer.push(f.label); }
         }
       } else if (f.type === 'radio') {
-        // Find the radio in this group whose option-label matches val
-        const groupSel = `input[type="radio"][name="${CSS.escape(f.name)}"]`;
-        const clicked = await page.evaluate(({ groupSel, val }) => {
+        // Find the radio in this group whose option-label matches val.
+        // CSS.escape lives in the browser, so build the selector inside the eval.
+        const clicked = await page.evaluate(({ groupName, val }) => {
           const wanted = val.toLowerCase().trim();
-          const radios = document.querySelectorAll(groupSel);
+          const radios = document.querySelectorAll(`input[type="radio"][name="${CSS.escape(groupName)}"]`);
           for (const r of radios) {
             // Get this radio's option label
             let optText = '';
@@ -1177,7 +1177,7 @@ async function fillGeneric(page, job, answersData, resumePath) {
             }
           }
           return false;
-        }, { groupSel, val });
+        }, { groupName: f.name, val });
         if (clicked) fieldsFilled++;
         else needsAnswer.push(f.label);
       } else if (f.type === 'checkbox') {
@@ -1205,11 +1205,17 @@ async function fillGeneric(page, job, answersData, resumePath) {
     } catch {}
   }
 
-  const outcome = needsAnswer.length === 0
-    ? 'FILLED_PENDING_REVIEW'
-    : (fieldsFilled === 0 ? 'NEEDS_MANUAL' : 'NEEDS_ANSWER');
+  let outcome;
+  if (fieldsFound === 0)              outcome = 'NEEDS_MANUAL';      // No form-like fields at all
+  else if (fieldsFilled === 0)        outcome = 'NEEDS_MANUAL';      // Couldn't fill anything
+  else if (needsAnswer.length === 0)  outcome = 'FILLED_PENDING_REVIEW';
+  else                                outcome = 'NEEDS_ANSWER';
 
-  return { outcome, fieldsFound, fieldsFilled, needsAnswer, reason: outcome === 'NEEDS_MANUAL' ? 'Generic handler found no fillable fields' : undefined };
+  const reason = outcome === 'NEEDS_MANUAL'
+    ? (fieldsFound === 0 ? 'No fillable form fields found' : 'Generic handler could not fill any field')
+    : undefined;
+
+  return { outcome, fieldsFound, fieldsFilled, needsAnswer, reason };
 }
 
 // ─── Screenshot helper ────────────────────────────────────────────────────────
@@ -1289,18 +1295,6 @@ if (isMain) (async () => {
   console.log(`Job #${jobNum} | ATS: ${ats} | URL: ${jobUrl}`);
   console.log(`Resume: ${resumePath || 'none'}`);
 
-  // Unsupported ATS — bail early
-  const supported = ['greenhouse', 'lever', 'ashby', 'workday'];
-  if (!supported.includes(ats)) {
-    writeStatus(jobNum, APPLY_STATUS.NEEDS_MANUAL, {
-      url: jobUrl,
-      ats,
-      reason: `ATS "${ats}" is not supported by smart-apply. Fill this one manually.`,
-    });
-    console.log(`NEEDS_MANUAL — ATS "${ats}" not supported`);
-    process.exit(0);
-  }
-
   writeStatus(jobNum, APPLY_STATUS.RUNNING, { url: jobUrl, ats });
 
   const browser = await chromium.launch({ headless });
@@ -1316,15 +1310,11 @@ if (isMain) (async () => {
     await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
 
-    if (ats === 'greenhouse') {
-      result = await fillGreenhouse(page, job, answersData, resumePath);
-    } else if (ats === 'lever') {
-      result = await fillLever(page, job, answersData, resumePath);
-    } else if (ats === 'ashby') {
-      result = await fillAshby(page, job, answersData, resumePath);
-    } else if (ats === 'workday') {
-      result = await fillWorkday(page, job, answersData, resumePath);
-    }
+    if      (ats === 'greenhouse') result = await fillGreenhouse(page, job, answersData, resumePath);
+    else if (ats === 'lever')      result = await fillLever(page, job, answersData, resumePath);
+    else if (ats === 'ashby')      result = await fillAshby(page, job, answersData, resumePath);
+    else if (ats === 'workday')    result = await fillWorkday(page, job, answersData, resumePath);
+    else                           result = await fillGeneric(page, job, answersData, resumePath);
   } catch (err) {
     result = { outcome: 'ERROR', error: err.message };
   }
