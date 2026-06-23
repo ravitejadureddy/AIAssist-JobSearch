@@ -352,18 +352,21 @@ async function fillGreenhouse(page, job, answersData, resumePath) {
     { id: 'disability_status',  answerId: 'disability_status' },
   ];
   for (const { id, answerId } of eeoFields) {
-    const el = page.locator(`input#${id}`).first();
+    // Use attribute selector instead of `#${id}` — bare ID selectors throw
+    // SyntaxError when the id starts with a digit (e.g., UUIDs in Ashby /
+    // Greenhouse v2 forms). Attribute selector `[id="..."]` works for any value.
+    const el = page.locator(`input[id="${id}"]`).first();
     if (await el.count() === 0) continue;
     const isReact = (await el.getAttribute('aria-haspopup').catch(() => null)) === 'true';
     if (!isReact) continue;
     const match = answersData.answers.find(a => a.id === answerId);
     if (!match) continue;
-    const container = page.locator(`input#${id}`).locator('..').locator('[class*="-container"]').first();
+    const container = page.locator(`input[id="${id}"]`).locator('..').locator('[class*="-container"]').first();
     // Greenhouse puts the React-Select container as a sibling/ancestor — locate via label
-    const wrapper = page.locator(`.select__container:has(#${id})`).first();
+    const wrapper = page.locator(`.select__container:has([id="${id}"])`).first();
     const cont = await wrapper.count() > 0
       ? wrapper.locator('[class*="-container"]').first()
-      : page.locator(`#${id}`).locator('xpath=ancestor::div[contains(@class,"container")]').first();
+      : page.locator(`[id="${id}"]`).locator('xpath=ancestor::div[contains(@class,"container")]').first();
     await fillReactSelect(cont, match.answer_short || match.answer).catch(() => {});
   }
 
@@ -381,10 +384,10 @@ async function fillGreenhouse(page, job, answersData, resumePath) {
     { id: 'degree--0', value: normalizeGhDegree(primaryEdu.degree), searchable: false },
   ] : [];
   for (const edu of eduIds) {
-    const el = page.locator(`input#${edu.id}`).first();
+    const el = page.locator(`input[id="${edu.id}"]`).first();
     if (await el.count() === 0) continue;
     // Mark the label as seen so the custom loop skips it
-    const wrapper = page.locator(`.select__container:has(#${edu.id}), .input-wrapper:has(#${edu.id})`).first();
+    const wrapper = page.locator(`.select__container:has([id="${edu.id}"]), .input-wrapper:has([id="${edu.id}"])`).first();
     const eduLabel = (await wrapper.locator('label').first().textContent().catch(() => '') || '').replace(/\*/g, '').trim();
     if (eduLabel) seen.add(eduLabel);
     const cont = await wrapper.count() > 0
@@ -487,7 +490,7 @@ async function fillGreenhouse(page, job, answersData, resumePath) {
 
       // ── Profile URL fields (v2 puts these as custom questions) ──────────────
       if (lbl.includes('linkedin')) {
-        await setField(`#${await block.locator('input[type="text"]').first().getAttribute('id').catch(() => '__none__')}`, p.linkedin);
+        await setField(`[id="${await block.locator('input[type="text"]').first().getAttribute('id').catch(() => '__none__')}"]`, p.linkedin);
         // Fallback: fill by aria-label
         await block.locator('input[type="text"]').first().fill(p.linkedin).catch(() => {});
         continue;
@@ -689,7 +692,8 @@ async function fillAshby(page, job, answersData, resumePath) {
     if (await label.count() === 0) return false;
     const id = await label.getAttribute('for');
     if (id) {
-      const inp = page.locator(`#${id}`).first();
+      // Attribute selector — `#${id}` throws when id starts with a digit (UUIDs).
+      const inp = page.locator(`[id="${id}"]`).first();
       if (await inp.count() > 0) { await inp.fill(value); return true; }
     }
     const parent = label.locator('..');
