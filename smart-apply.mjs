@@ -154,19 +154,32 @@ function workAuthAnswer(label, answersData) {
   const l = label.toLowerCase();
   const auth = answersData.work_auth;
 
-  // "authorized to work in the US?" → Yes
-  if (l.includes('authorized') && !l.includes('sponsor')) return auth.authorized_to_work_us_text;
-  // "will you require sponsorship?" → Yes
+  // Detect negation in the question (e.g., "Do you NOT require sponsorship?",
+  // "Are you NOT authorized to work?"). Invert the canonical Yes/No answer.
+  // We deliberately don't treat double negatives — those phrasings are rare
+  // enough that letting the user fix them manually is safer.
+  const negated = /\b(not|don'?t|do not|cannot|won'?t|will not)\b/i.test(l);
+  const invert = (yesNoText) => {
+    if (!yesNoText) return yesNoText;
+    if (/^yes$/i.test(yesNoText.trim())) return 'No';
+    if (/^no$/i.test(yesNoText.trim())) return 'Yes';
+    return yesNoText;
+  };
+  const maybeInvert = (text) => negated ? invert(text) : text;
+
+  // "authorized to work in the US?" → Yes (or No if negated)
+  if (l.includes('authorized') && !l.includes('sponsor')) return maybeInvert(auth.authorized_to_work_us_text);
+  // "will you require sponsorship?" → Yes (or No if negated)
   if (l.includes('sponsorship') || l.includes('sponsor') || l.includes('require visa') ||
       l.includes('h-1b') || l.includes('h1b') || l.includes('immigration')) {
-    return auth.requires_sponsorship_text;
+    return maybeInvert(auth.requires_sponsorship_text);
   }
-  // "citizen or GC?" → No
+  // "citizen or GC?" → No (or Yes if negated)
   if (l.includes('citizen') || l.includes('green card') || l.includes('permanent resident')) {
-    return auth.citizen_or_gc_text;
+    return maybeInvert(auth.citizen_or_gc_text);
   }
   // "work permit" or generic work auth
-  if (l.includes('eligible to work') || l.includes('legal right')) return auth.authorized_to_work_us_text;
+  if (l.includes('eligible to work') || l.includes('legal right')) return maybeInvert(auth.authorized_to_work_us_text);
   return null;
 }
 
@@ -1067,6 +1080,31 @@ async function fillGeneric(page, job, answersData, resumePath) {
         value: el.value || '',
       });
     });
+
+    // ARIA comboboxes — custom React/widget dropdowns. We capture them so the
+    // fill loop can click → wait for [role=option] → pick the match.
+    document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"]').forEach(el => {
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return;
+      const label = clean(labelFor(el));
+      // Use id for selector when present, fallback to a positional path.
+      let selector = el.id ? `#${CSS.escape(el.id)}` : null;
+      if (!selector) {
+        // Tag the element so we can find it again from Node (set an attribute Playwright can select).
+        const tag = `co-combobox-${idx}`;
+        el.setAttribute('data-co-tag', tag);
+        selector = `[data-co-tag="${tag}"]`;
+      }
+      out.push({
+        idx: idx++,
+        tag: 'div', type: 'combobox',
+        name: el.getAttribute('aria-label') || '', id: el.id || '',
+        selector, label,
+        value: el.textContent?.trim() || '',
+      });
+    });
+
     return out;
   });
 
@@ -1141,6 +1179,22 @@ async function fillGeneric(page, job, answersData, resumePath) {
       if (f.type === 'text' || f.type === 'tel' || f.type === 'email' || f.type === 'number' || f.type === 'textarea') {
         await loc.fill(val);
         fieldsFilled++;
+      } else if (f.type === 'date') {
+        // Native <input type="date"> wants YYYY-MM-DD. Convert common phrases.
+        let dateVal = val.trim();
+        if (/^immediate(ly)?$|^asap$|^right (away|now)$/i.test(dateVal)) {
+          dateVal = new Date().toISOString().slice(0, 10);
+        } else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateVal)) {
+          const [m, d, y] = dateVal.split('/');
+          dateVal = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+        }
+        // Only fill if we ended up with an ISO date — otherwise mark needs-answer.
+        if (/^\d{4}-\d{2}-\d{2}$/.test(dateVal)) {
+          await loc.fill(dateVal);
+          fieldsFilled++;
+        } else {
+          needsAnswer.push(f.label);
+        }
       } else if (f.tag === 'select') {
         // Try selectOption by label first, then by value
         try {
@@ -1150,14 +1204,51 @@ async function fillGeneric(page, job, answersData, resumePath) {
           try { await loc.selectOption({ value: val }); fieldsFilled++; }
           catch { needsAnswer.push(f.label); }
         }
+      } else if (f.type === 'combobox') {
+        // ARIA combobox / React custom dropdown:
+        //   1. Click the combobox to expand the listbox
+        //   2. Wait briefly for [role="option"] to render
+        //   3. Find an option whose text matches val, click it
+        const opened = await (async () => {
+          try { await loc.click(); return true; } catch { return false; }
+        })();
+        if (!opened) { needsAnswer.push(f.label); continue; }
+        await page.waitForTimeout(350); // give the listbox time to render
+        const wanted = val.toLowerCase().trim();
+        const optionClicked = await page.evaluate((wanted) => {
+          const opts = [...document.querySelectorAll('[role="option"]:not([aria-disabled="true"])')];
+          // Prefer exact case-insensitive match, then word-boundary contains, then loose contains.
+          let best = null, bestScore = 0;
+          for (const o of opts) {
+            const t = (o.textContent || '').trim().toLowerCase();
+            let score = 0;
+            if (t === wanted) score = 3;
+            else if (new RegExp(`\\b${wanted.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\b`).test(t)) score = 2;
+            else if (t.includes(wanted)) score = 1;
+            if (score > bestScore) { best = o; bestScore = score; }
+          }
+          if (best) { best.click(); return true; }
+          return false;
+        }, wanted);
+        if (optionClicked) {
+          fieldsFilled++;
+          await page.waitForTimeout(150); // let the widget close + state settle
+        } else {
+          // Couldn't find an option — close the listbox and mark needs-answer.
+          await page.keyboard.press('Escape').catch(() => {});
+          needsAnswer.push(f.label);
+        }
       } else if (f.type === 'radio') {
         // Find the radio in this group whose option-label matches val.
         // CSS.escape lives in the browser, so build the selector inside the eval.
         const clicked = await page.evaluate(({ groupName, val }) => {
           const wanted = val.toLowerCase().trim();
+          const wantedIsYesNo = wanted === 'yes' || wanted === 'no';
           const radios = document.querySelectorAll(`input[type="radio"][name="${CSS.escape(groupName)}"]`);
+
+          // Collect option label for each radio first, then rank by match quality.
+          const candidates = [];
           for (const r of radios) {
-            // Get this radio's option label
             let optText = '';
             const wrap = r.closest('label');
             if (wrap) {
@@ -1169,13 +1260,29 @@ async function fillGeneric(page, job, answersData, resumePath) {
               optText = document.querySelector(`label[for="${CSS.escape(r.id)}"]`)?.textContent?.trim() || '';
             }
             if (!optText) optText = r.value || '';
-            if (optText.toLowerCase() === wanted ||
-                optText.toLowerCase().includes(wanted) ||
-                wanted.includes(optText.toLowerCase())) {
-              r.click();
-              return true;
-            }
+            candidates.push({ r, optText, low: optText.toLowerCase().trim() });
           }
+
+          // Match priorities (highest wins):
+          //   3 — exact case-insensitive match
+          //   2 — single-letter Y/N abbreviation when wanted is yes/no
+          //   1 — option label is contained in wanted (e.g., "Yes, I am" contains "yes")
+          //   0 — wanted is contained in option label (loose — last resort)
+          const scoreOf = (c) => {
+            if (c.low === wanted)                                    return 3;
+            if (wantedIsYesNo && c.low === wanted[0])                return 2; // "y"/"n"
+            if (wantedIsYesNo && c.low.split(/\W+/)[0] === wanted)   return 2; // "Yes, I am"
+            // Word-boundary contains avoids "yesterday" matching "yes"
+            const re = new RegExp(`\\b${wanted.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\b`);
+            if (re.test(c.low))                                      return 1;
+            return 0;
+          };
+          let best = null, bestScore = 0;
+          for (const c of candidates) {
+            const s = scoreOf(c);
+            if (s > bestScore) { best = c; bestScore = s; }
+          }
+          if (best && bestScore >= 1) { best.r.click(); return true; }
           return false;
         }, { groupName: f.name, val });
         if (clicked) fieldsFilled++;
@@ -1205,6 +1312,42 @@ async function fillGeneric(page, job, answersData, resumePath) {
     } catch {}
   }
 
+  // Detect form embedded in iframe — warn the user since this handler
+  // doesn't walk into frames. Forms in iframes are rare in modern career
+  // sites but still happen (mainly old ATS widgets).
+  const iframeForms = await page.evaluate(() => {
+    const frames = [...document.querySelectorAll('iframe')];
+    return frames
+      .filter(f => {
+        const r = f.getBoundingClientRect();
+        return r.width > 200 && r.height > 200; // skip tiny tracking iframes
+      })
+      .map(f => f.src || '(blank src)')
+      .filter(src => !/google|analytics|doubleclick|facebook|hotjar|recaptcha/i.test(src))
+      .slice(0, 3);
+  }).catch(() => []);
+  if (iframeForms.length > 0) {
+    needsAnswer.unshift(`⚠ Form may be embedded in iframe — handler can't reach it: ${iframeForms.join(', ')}`);
+  }
+
+  // Detect Next/Continue button — wizard hint
+  const nextButton = await page.evaluate(() => {
+    const buttons = [...document.querySelectorAll('button, input[type="submit"], a[role="button"]')];
+    const labels = ['next', 'continue', 'save and continue', 'proceed', 'next step', 'next page'];
+    for (const b of buttons) {
+      if (b.disabled || b.getAttribute('aria-disabled') === 'true') continue;
+      const r = b.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const t = (b.textContent || b.value || '').toLowerCase().trim();
+      for (const l of labels) {
+        if (t === l || t.startsWith(l + ' ') || t.endsWith(' ' + l) || t.includes(l)) {
+          return t;
+        }
+      }
+    }
+    return null;
+  }).catch(() => null);
+
   let outcome;
   if (fieldsFound === 0)              outcome = 'NEEDS_MANUAL';      // No form-like fields at all
   else if (fieldsFilled === 0)        outcome = 'NEEDS_MANUAL';      // Couldn't fill anything
@@ -1215,7 +1358,7 @@ async function fillGeneric(page, job, answersData, resumePath) {
     ? (fieldsFound === 0 ? 'No fillable form fields found' : 'Generic handler could not fill any field')
     : undefined;
 
-  return { outcome, fieldsFound, fieldsFilled, needsAnswer, reason };
+  return { outcome, fieldsFound, fieldsFilled, needsAnswer, reason, hasNextStep: !!nextButton, nextLabel: nextButton };
 }
 
 // ─── Screenshot helper ────────────────────────────────────────────────────────

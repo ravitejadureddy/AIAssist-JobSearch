@@ -109,6 +109,13 @@ async function injectBanner(page, result) {
     msg = `career-ops: ${result.outcome}${result.error ? ' — ' + result.error : ''}`;
   }
 
+  // Append wizard hint: if a Next/Continue button is visible, this is a
+  // multi-step form. After review + click Next, the agent re-fires on the
+  // new URL/page state.
+  if (result.hasNextStep && result.outcome !== 'NEEDS_MANUAL') {
+    msg += `  ▶ Multi-step form: after reviewing, click "${result.nextLabel}" to advance.`;
+  }
+
   await page.evaluate(({ msg, bgColor, needsAnswer }) => {
     document.getElementById('_co_banner')?.remove();
     const el = document.createElement('div');
