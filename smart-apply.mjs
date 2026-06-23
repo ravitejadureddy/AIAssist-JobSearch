@@ -999,6 +999,219 @@ async function fillWorkday(page, job, answersData, resumePath) {
     : { outcome: 'FILLED_PENDING_REVIEW' };
 }
 
+// ─── Generic fallback handler — works on any custom career page ──────────────
+// Used when detectATS() returns 'unknown' but the URL looks like an apply page
+// (matched by isLikelyApplyUrl in fill-agent.mjs). Walks every form field,
+// matches its label against profile / work-auth / answer DB patterns, fills
+// what it can. Best-effort: fill rate ~60% on average since custom sites use
+// non-standard label associations + custom widgets. Unmatched fields are
+// reported as needsAnswer so the in-page banner highlights them.
+async function fillGeneric(page, job, answersData, resumePath) {
+  const p = answersData.profile;
+  const needsAnswer = [];
+  let fieldsFound = 0;
+  let fieldsFilled = 0;
+
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+  const bodyText = await page.textContent('body').catch(() => '');
+  if (/you('ve| have) already applied/i.test(bodyText) || /application (is )?already submitted/i.test(bodyText)) {
+    return { outcome: 'DUPLICATE' };
+  }
+
+  // ── In-page DOM helpers (run inside the browser) ──────────────────────────
+  // Returns a list of fillable fields with their derived question label,
+  // current value, type, and a stable selector we can target from Node.
+  const fields = await page.evaluate(() => {
+    const labelFor = (el) => {
+      if (el.id) {
+        const direct = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (direct?.textContent?.trim()) return direct.textContent;
+      }
+      const fs = el.closest('fieldset');
+      if (fs) { const lg = fs.querySelector('legend'); if (lg?.textContent?.trim()) return lg.textContent; }
+      const wrap = el.closest('[class*="wrapper"],[class*="field"],[class*="container"],[class*="question"],[class*="form-row"],[role="group"]');
+      const lbl = wrap?.querySelector('label');
+      if (lbl?.textContent?.trim()) return lbl.textContent;
+      const labelledBy = el.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const ref = document.getElementById(labelledBy);
+        if (ref?.textContent?.trim()) return ref.textContent;
+      }
+      return el.getAttribute('aria-label') || el.placeholder || el.name || '';
+    };
+    const clean = (s) => (s || '').replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+
+    const out = [];
+    let idx = 0;
+    const tagSel = (el) => {
+      // Build a stable querySelector. Prefer id, then name+type, then nth-of-type.
+      if (el.id) return `#${CSS.escape(el.id)}`;
+      if (el.name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(el.name)}"]`;
+      return null;
+    };
+
+    document.querySelectorAll('input,textarea,select').forEach(el => {
+      if (el.disabled || el.readOnly || el.type === 'hidden') return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return; // invisible
+      const label = clean(labelFor(el));
+      const selector = tagSel(el);
+      // For radio groups we collapse to one entry per name
+      const tag = el.tagName.toLowerCase();
+      const type = tag === 'input' ? (el.type || 'text') : tag;
+      out.push({
+        idx: idx++,
+        tag, type, name: el.name || '', id: el.id || '',
+        selector, label,
+        value: el.value || '',
+      });
+    });
+    return out;
+  });
+
+  // De-duplicate radio groups by (name, type=radio); keep first.
+  const seenRadioName = new Set();
+  const planned = [];
+  for (const f of fields) {
+    if (f.type === 'radio') {
+      if (!f.name || seenRadioName.has(f.name)) continue;
+      seenRadioName.add(f.name);
+    }
+    planned.push(f);
+  }
+  fieldsFound = planned.length;
+
+  // Resolve answer for each field. Profile + work-auth take precedence.
+  const profilePatterns = [
+    [/^first.?name|^given.?name|^fname/i, p.first_name],
+    [/^last.?name|^surname|^family.?name|^lname/i, p.last_name],
+    [/^full.?name$|^name$|legal name/i, p.full_name],
+    [/^email/i, p.email],
+    [/phone|mobile|cell/i, p.phone],
+    [/^city/i, p.city],
+    [/^state|province/i, p.state],
+    [/^zip|postal/i, p.zip],
+    [/^country/i, p.country],
+    [/^address|street/i, p.location],
+    [/linkedin/i, p.linkedin],
+    [/website|portfolio|personal site/i, p.website],
+    [/github/i, p.github],
+  ];
+
+  const resolveAnswer = (label, fieldType) => {
+    if (!label) return null;
+    // Work auth
+    if (isWorkAuthLabel(label)) return { value: workAuthAnswer(label, answersData), source: 'work_auth' };
+    // Profile patterns
+    for (const [re, val] of profilePatterns) {
+      if (re.test(label) && val) return { value: val, source: 'profile' };
+    }
+    // Answer DB patterns
+    const m = matchAnswer(label, answersData);
+    if (m) return { value: m.answer, source: 'answer_db', type: m.type };
+    return null;
+  };
+
+  // ── Fill plan ─────────────────────────────────────────────────────────────
+  for (const f of planned) {
+    if (!f.label || f.label.length < 2) continue;
+
+    // Resume upload
+    if (f.type === 'file' && /resume|cv|attach/i.test(f.label + ' ' + (f.name || ''))) {
+      if (resumePath && existsSync(resumePath) && f.selector) {
+        try {
+          await page.locator(f.selector).first().setInputFiles(resumePath);
+          fieldsFilled++;
+          await page.waitForTimeout(800);
+        } catch {}
+      }
+      continue;
+    }
+
+    if (!f.selector) { needsAnswer.push(f.label); continue; }
+
+    const ans = resolveAnswer(f.label, f.type);
+    if (!ans?.value) { needsAnswer.push(f.label); continue; }
+    const val = String(ans.value);
+
+    const loc = page.locator(f.selector).first();
+
+    try {
+      if (f.type === 'text' || f.type === 'tel' || f.type === 'email' || f.type === 'number' || f.type === 'textarea') {
+        await loc.fill(val);
+        fieldsFilled++;
+      } else if (f.tag === 'select') {
+        // Try selectOption by label first, then by value
+        try {
+          await loc.selectOption({ label: val });
+          fieldsFilled++;
+        } catch {
+          try { await loc.selectOption({ value: val }); fieldsFilled++; }
+          catch { needsAnswer.push(f.label); }
+        }
+      } else if (f.type === 'radio') {
+        // Find the radio in this group whose option-label matches val
+        const groupSel = `input[type="radio"][name="${CSS.escape(f.name)}"]`;
+        const clicked = await page.evaluate(({ groupSel, val }) => {
+          const wanted = val.toLowerCase().trim();
+          const radios = document.querySelectorAll(groupSel);
+          for (const r of radios) {
+            // Get this radio's option label
+            let optText = '';
+            const wrap = r.closest('label');
+            if (wrap) {
+              const clone = wrap.cloneNode(true);
+              clone.querySelectorAll('input').forEach(n => n.remove());
+              optText = clone.textContent.trim();
+            }
+            if (!optText && r.id) {
+              optText = document.querySelector(`label[for="${CSS.escape(r.id)}"]`)?.textContent?.trim() || '';
+            }
+            if (!optText) optText = r.value || '';
+            if (optText.toLowerCase() === wanted ||
+                optText.toLowerCase().includes(wanted) ||
+                wanted.includes(optText.toLowerCase())) {
+              r.click();
+              return true;
+            }
+          }
+          return false;
+        }, { groupSel, val });
+        if (clicked) fieldsFilled++;
+        else needsAnswer.push(f.label);
+      } else if (f.type === 'checkbox') {
+        // Yes-ish values → check, otherwise leave alone
+        if (/^(yes|true|1|on)$/i.test(val)) {
+          await loc.check();
+          fieldsFilled++;
+        }
+      } else {
+        needsAnswer.push(f.label);
+      }
+    } catch {
+      needsAnswer.push(f.label);
+    }
+  }
+
+  // Resume upload fallback: if no labelled file input was matched, attach to
+  // the first file input named "resume" / "cv" / "attach".
+  if (resumePath && existsSync(resumePath)) {
+    try {
+      const fileInput = page.locator('input[type="file"][name*="resume" i], input[type="file"][name*="cv" i], input[type="file"][id*="resume" i], input[type="file"][id*="cv" i]').first();
+      if (await fileInput.count() > 0) {
+        await fileInput.setInputFiles(resumePath).catch(() => {});
+      }
+    } catch {}
+  }
+
+  const outcome = needsAnswer.length === 0
+    ? 'FILLED_PENDING_REVIEW'
+    : (fieldsFilled === 0 ? 'NEEDS_MANUAL' : 'NEEDS_ANSWER');
+
+  return { outcome, fieldsFound, fieldsFilled, needsAnswer, reason: outcome === 'NEEDS_MANUAL' ? 'Generic handler found no fillable fields' : undefined };
+}
+
 // ─── Screenshot helper ────────────────────────────────────────────────────────
 async function screenshot(page, num) {
   mkdirSync(ssDir(), { recursive: true });
@@ -1010,7 +1223,7 @@ async function screenshot(page, num) {
 
 // ─── Exports (used by fill-agent.mjs when imported as a module) ──────────────
 export {
-  fillGreenhouse, fillLever, fillAshby, fillWorkday,
+  fillGreenhouse, fillLever, fillAshby, fillWorkday, fillGeneric,
   detectATS, loadAnswers, matchAnswer, workAuthAnswer, isWorkAuthLabel,
   lookupJob, extractUrlFromReport, CAREER_OPS,
 };

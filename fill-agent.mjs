@@ -13,7 +13,7 @@ import { chromium } from 'playwright';
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 import {
-  fillGreenhouse, fillLever, fillAshby, fillWorkday,
+  fillGreenhouse, fillLever, fillAshby, fillWorkday, fillGeneric,
   detectATS, loadAnswers, isWorkAuthLabel, workAuthAnswer, CAREER_OPS,
 } from './smart-apply.mjs';
 
@@ -324,6 +324,7 @@ async function fillPage(page, url, ats) {
     else if (ats === 'lever')          result = await fillLever(page, job, answersData, resumePath);
     else if (ats === 'ashby')          result = await fillAshby(page, job, answersData, resumePath);
     else if (ats === 'workday')        result = await fillWorkday(page, job, answersData, resumePath);
+    else if (isLikelyApplyUrl(url))    result = await fillGeneric(page, job, answersData, resumePath);
     else result = { outcome: 'NEEDS_MANUAL', reason: `ATS "${ats}" not yet supported` };
   } catch (err) {
     result = { outcome: 'ERROR', error: err.message };
@@ -337,6 +338,26 @@ async function fillPage(page, url, ats) {
 // ── ATS URL filter — only fire for pages that look like application forms ─────
 const SKIP_URL_PREFIXES = ['chrome:', 'about:', 'chrome-extension:'];
 const SKIP_HOSTS = ['linkedin.com', 'google.com', 'github.com', 'stackoverflow.com'];
+
+// Generic-handler eligibility: URL or hostname strongly suggests an application
+// page. Without this the generic handler would fire on any random web page.
+function isLikelyApplyUrl(url) {
+  if (!url?.startsWith('http')) return false;
+  try {
+    const u = new URL(url);
+    const path = u.pathname.toLowerCase();
+    const host = u.hostname.toLowerCase();
+    // Path looks like an apply step (matches careers.*/apply, *.com/job/.../apply, etc.)
+    if (/\/(apply|application|applicant)(\/|$|\?)/.test(path)) return true;
+    if (/\/careers?\/.*(apply|application|job|position|opening)/.test(path)) return true;
+    // Host is a careers subdomain AND path mentions the role
+    if (/^(careers?|jobs?|recruit|hiring|talent|apply)\./.test(host) && /\/(job|position|career|apply)/.test(path)) return true;
+    // Embedded apply widget on the main marketing site
+    if (/careers?|jobs?/.test(path) && /(apply|application)/.test(path)) return true;
+  } catch {}
+  return false;
+}
+
 function shouldWatch(url) {
   if (!url?.startsWith('http')) return false;
   if (SKIP_URL_PREFIXES.some(p => url.startsWith(p))) return false;
@@ -345,7 +366,10 @@ function shouldWatch(url) {
     if (SKIP_HOSTS.some(h => host.includes(h))) return false;
   } catch { return false; }
   const ats = detectATS(url);
-  return ats !== 'unknown' && ats !== 'linkedin';
+  if (ats !== 'unknown' && ats !== 'linkedin') return true;
+  // Unknown ATS: still watch if the URL looks like an apply page so the
+  // generic fallback can fire (custom company career sites).
+  return isLikelyApplyUrl(url);
 }
 
 // ── FillAgent class ───────────────────────────────────────────────────────────
