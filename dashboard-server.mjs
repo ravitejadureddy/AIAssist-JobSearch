@@ -1100,6 +1100,32 @@ function openFill(num, jobUrl) {
       }
     } catch {}
   };
+
+  // One-shot fetch on page load: render the banner from current backfill state
+  // immediately, instead of waiting for the next SSE event (which only fires
+  // when a PDF completes or state transitions — could take ~60s).
+  // GET only — does NOT trigger a backfill. Server's startup setTimeout(10s)
+  // handles auto-start.
+  fetch('/api/pdf-backfill').then(r => r.json()).then(d => {
+    if (!d?.stats) return;
+    const { stats, missing } = d;
+    // Nothing to show if not running and nothing missing
+    if (!stats.running && (stats.done || 0) === 0 && (missing || 0) === 0) return;
+
+    const banner = document.createElement('div');
+    banner.id = 'pdf-backfill-banner';
+    banner.style.cssText = 'background:#1e3a5f;color:#93c5fd;padding:7px 16px;font-size:0.8em;text-align:center;border-bottom:1px solid #2563eb';
+    if (stats.running) {
+      const passInfo = stats.pass ? \` · Pass \${stats.pass}/2\` : '';
+      banner.innerHTML = \`⏳ Generating missing resumes… <strong>\${stats.done}/\${stats.total}</strong> done\${stats.failed > 0 ? \` · \${stats.failed} failed\` : ''}\${passInfo}\`;
+    } else if ((missing || 0) > 0) {
+      banner.innerHTML = \`ℹ️ <strong>\${missing}</strong> tailored resume\${missing === 1 ? '' : 's'} pending — backfill will start within ~10s\`;
+    } else {
+      banner.innerHTML = \`✅ Resumes ready: <strong>\${stats.done}</strong> generated\${stats.failed > 0 ? \` · \${stats.failed} failed\` : ''}\`;
+    }
+    const content = document.querySelector('.content');
+    content ? content.insertAdjacentElement('beforebegin', banner) : document.body.prepend(banner);
+  }).catch(() => {});
 })();
 
 
