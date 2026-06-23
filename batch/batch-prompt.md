@@ -281,95 +281,32 @@ next_action: "{one concrete next step}"
 (15-20 keywords del JD para ATS)
 ```
 
-### Paso 4 — Generar PDF (configurable)
+### Paso 4 — Skip PDF generation (deferred to dashboard backfill)
 
-**Gate:** Read `config/profile.yml` → `auto_pdf_score_threshold`. If the key is absent, default to **`3.0`** (the original gate of Path A). This step ONLY runs when the score from Paso 2 is **≥ the resolved threshold**. For everything below it, skip this entire step — the user can generate a tailored PDF on demand later via `/career-ops pdf {company-slug}` using the report from Paso 3 as input.
+**Do NOT generate a PDF in this step.** PDF generation has been moved
+entirely to the dashboard backfill, which uses the deterministic
+template-fill flow (JSON-only worker → `build-tailored-cv.mjs` →
+`templates/cv-template.html` → `generate-pdf.mjs`).
 
-**Rationale:** Generating a tailored PDF costs ~30–60s per offer (Playwright launch + HTML render) and produces files that often go unused — most roles score 2.x/3.x and never reach application. The `3.0` default matches Path A's original behavior; raise `auto_pdf_score_threshold` (e.g. `4.0`) to pre-generate fewer PDFs, or set `0` to generate one for every offer. Both Path A (`/career-ops pipeline`) and Path B (this batch worker) read the same config key for consistency.
+The previous batch worker flow (claude writes its own HTML, then calls
+`generate-pdf.mjs`) produced PDFs whose design (cyan + purple chips,
+Space Grotesk fonts) does NOT match the canonical on-disk template
+(navy single-color, HelveticaNeue, inline skills). Those wrong-design
+PDFs landed in Apply Queue and were submitted to employers.
 
-**If score < threshold:**
-- Skip steps 1–14 below.
-- In the report header use: `**PDF:** not generated — run /career-ops pdf {company-slug} to create on demand`.
+**For every offer, regardless of score:**
+- In the report header use: `**PDF:** not generated — dashboard backfill will create on next session`.
 - In Paso 5 (tracker line) use `pdf_emoji` = `❌`.
 - In Paso 6 (output JSON) set `"pdf": null`.
-- Done — move to Paso 5.
 
-**If score ≥ threshold**, generate the tailored PDF:
+The dashboard's `generate-missing-pdfs.mjs` runs every dashboard session
+start. It scans Apply Queue jobs (`Evaluated`, score ≥ 3.5, last 3
+business days) and generates any missing `resume.pdf` using the canonical
+navy template via the deterministic template-fill flow. The user always
+gets the right design.
 
-1. Lee `cv.md` + `i18n.ts`
-2. Extrae 15-20 keywords del JD
-3. Detecta idioma del JD → idioma del CV (EN default)
-4. Detecta ubicación empresa → formato papel: US/Canada → `letter`, resto → `a4`
-5. Detecta arquetipo → adapta framing
-6. Reescribe Professional Summary inyectando keywords
-7. Selecciona top 3-4 proyectos más relevantes
-8. Reordena bullets de experiencia por relevancia al JD
-9. Construye competency grid (6-8 keyword phrases)
-10. Inyecta keywords en logros existentes (**NUNCA inventa**)
-11. Genera HTML completo desde template (lee `templates/cv-template.html`)
-12. Escribe HTML a `/tmp/cv-candidate-{company-slug}.html`
-13. Ejecuta:
-```bash
-mkdir -p output/{report_num}-{company-slug}
-node generate-pdf.mjs \
-  /tmp/cv-candidate-{company-slug}.html \
-  output/{report_num}-{company-slug}/resume.pdf \
-  --format={letter|a4}
-```
-14. Reporta: ruta PDF, nº páginas, % cobertura keywords
-
-On success, in Paso 5 use `pdf_emoji` = `✅` and in Paso 6 set `"pdf"` to `output/{report_num}-{company-slug}/resume.pdf`.
-
-**Reglas ATS:**
-- Single-column (sin sidebars)
-- Headers estándar: "Professional Summary", "Work Experience", "Education", "Skills", "Certifications", "Projects"
-- Sin texto en imágenes/SVGs
-- Sin info crítica en headers/footers
-- UTF-8, texto seleccionable
-- Keywords distribuidas: Summary (top 5), primer bullet de cada rol, Skills section
-
-**Diseño:**
-- Fonts: Space Grotesk (headings, 600-700) + DM Sans (body, 400-500)
-- Fonts self-hosted: `fonts/`
-- Header: Space Grotesk 24px bold + gradiente cyan→purple 2px + contacto
-- Section headers: Space Grotesk 13px uppercase, color cyan `hsl(187,74%,32%)`
-- Body: DM Sans 11px, line-height 1.5
-- Company names: purple `hsl(270,70%,45%)`
-- Márgenes: 0.6in
-- Background: blanco
-
-**Estrategia keyword injection (ético):**
-- Reformular experiencia real con vocabulario exacto del JD
-- NUNCA añadir skills the candidate doesn't have
-- Ejemplo: JD dice "RAG pipelines" y CV dice "LLM workflows with retrieval" → "RAG pipeline design and LLM orchestration workflows"
-
-**Template placeholders (en cv-template.html):**
-
-| Placeholder | Contenido |
-|-------------|-----------|
-| `{{LANG}}` | `en` o `es` |
-| `{{PAGE_WIDTH}}` | `8.5in` (letter) o `210mm` (A4) |
-| `{{NAME}}` | (from profile.yml) |
-| `{{EMAIL}}` | (from profile.yml) |
-| `{{LINKEDIN_URL}}` | (from profile.yml) |
-| `{{LINKEDIN_DISPLAY}}` | (from profile.yml) |
-| `{{PORTFOLIO_URL}}` | (from profile.yml) |
-| `{{PORTFOLIO_DISPLAY}}` | (from profile.yml) |
-| `{{LOCATION}}` | (from profile.yml) |
-| `{{SECTION_SUMMARY}}` | Professional Summary / Resumen Profesional |
-| `{{SUMMARY_TEXT}}` | Summary personalizado con keywords |
-| `{{SECTION_COMPETENCIES}}` | Core Competencies / Competencias Core |
-| `{{COMPETENCIES}}` | `<span class="competency-tag">keyword</span>` × 6-8 |
-| `{{SECTION_EXPERIENCE}}` | Work Experience / Experiencia Laboral |
-| `{{EXPERIENCE}}` | HTML de cada trabajo con bullets reordenados |
-| `{{SECTION_PROJECTS}}` | Projects / Proyectos |
-| `{{PROJECTS}}` | HTML de top 3-4 proyectos |
-| `{{SECTION_EDUCATION}}` | Education / Formación |
-| `{{EDUCATION}}` | HTML de educación |
-| `{{SECTION_CERTIFICATIONS}}` | Certifications / Certificaciones |
-| `{{CERTIFICATIONS}}` | HTML de certificaciones |
-| `{{SECTION_SKILLS}}` | Skills / Competencias |
-| `{{SKILLS}}` | HTML de skills |
+For ad-hoc PDF needs, the user can run `/career-ops pdf {company-slug}`
+manually — that path also uses the template-fill flow (see `modes/pdf.md`).
 
 ### Paso 5 — Tracker Line
 
