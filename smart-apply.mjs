@@ -118,6 +118,7 @@ function detectATS(url) {
   if (/linkedin\.com\/jobs/i.test(url))                             return 'linkedin';
   if (/rippling\.com/i.test(url))                                   return 'rippling';
   if (/dover\.com/i.test(url))                                      return 'dover';
+  if (/successfactors\.com|successfactors\.eu/i.test(url))         return 'successfactors';
   return 'unknown';
 }
 

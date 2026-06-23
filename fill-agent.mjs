@@ -327,11 +327,18 @@ async function fillPage(page, url, ats) {
 
   let result;
   try {
-    if      (ats === 'greenhouse')     result = await fillGreenhouse(page, job, answersData, resumePath);
-    else if (ats === 'lever')          result = await fillLever(page, job, answersData, resumePath);
-    else if (ats === 'ashby')          result = await fillAshby(page, job, answersData, resumePath);
-    else if (ats === 'workday')        result = await fillWorkday(page, job, answersData, resumePath);
-    else if (isLikelyApplyUrl(url))    result = await fillGeneric(page, job, answersData, resumePath);
+    if      (ats === 'greenhouse')                result = await fillGreenhouse(page, job, answersData, resumePath);
+    else if (ats === 'lever')                     result = await fillLever(page, job, answersData, resumePath);
+    else if (ats === 'ashby')                     result = await fillAshby(page, job, answersData, resumePath);
+    else if (ats === 'workday')                   result = await fillWorkday(page, job, answersData, resumePath);
+    // Recognized ATS without a dedicated handler (successfactors, icims,
+    // taleo, bamboohr, smartrecruiters, jobvite, rippling, dover) → use the
+    // generic fallback handler. It walks visible form fields, matches by
+    // label, fills profile + work-auth + answer-DB matches. ~50-60% fill
+    // rate, captures the rest as needs-answer.
+    else if (ats !== 'unknown' && ats !== 'linkedin')
+                                                  result = await fillGeneric(page, job, answersData, resumePath);
+    else if (isLikelyApplyUrl(url))               result = await fillGeneric(page, job, answersData, resumePath);
     else result = { outcome: 'NEEDS_MANUAL', reason: `ATS "${ats}" not yet supported` };
   } catch (err) {
     result = { outcome: 'ERROR', error: err.message };
