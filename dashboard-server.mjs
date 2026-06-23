@@ -159,8 +159,19 @@ function parseApplications() {
     const reportPath = parseReportPath(report);
     const notesStr = notes || '';
 
+    // Derive reportNum from the link target (the canonical reference). When
+    // tracker col 1 has drifted from the report file number after re-evals,
+    // this is the number that matches the output folder, the report file, and
+    // the link bracket — which is what the user expects to see in the # column.
+    let reportNum = numInt;
+    if (reportPath) {
+      const m = reportPath.match(/reports\/(\d+)-/);
+      if (m) reportNum = parseInt(m[1]);
+    }
+
     apps.push({
       num: numInt,
+      reportNum,
       date: date || '',
       company: company || '',
       role: role || '',
@@ -941,7 +952,7 @@ function renderDashboard(apps, mode, pendingCount) {
     }
 
     return `<tr id="row-${a.num}">
-  <td style="color:#475569;font-size:0.78em">${a.num}</td>
+  <td style="color:#475569;font-size:0.78em" title="tracker row #${a.num}">${a.reportNum}</td>
   <td style="color:#475569;font-size:0.78em;white-space:nowrap">${esc(a.date)}</td>
   <td style="font-weight:600;white-space:nowrap">${esc(a.company)}</td>
   <td style="color:#cbd5e1">${esc(a.role)}</td>

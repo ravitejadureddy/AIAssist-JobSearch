@@ -356,10 +356,12 @@ function markTrackerPdfDone(reportNum) {
   const lines = readFileSync(TRACKER_FILE, 'utf-8').split('\n').map(line => {
     if (!line.startsWith('|')) return line;
     const cols = line.split('|');
-    // Report link column (index 8 in pipe-split) contains the report number
+    // Match by link TARGET (the report file number in reports/NNN-...md), not
+    // by the bracketed display number. The display can drift from the file
+    // number after re-evaluations; the file path is the canonical reference.
     const reportCol = cols[8]?.trim() || '';
-    const numM = reportCol.match(/\[(\d+)\]/);
-    if (!numM || numM[1] !== String(reportNum)) return line;
+    const linkM = reportCol.match(/\((?:[^)]*\/)?(\d+)-[^)]*\.md\)/);
+    if (!linkM || linkM[1] !== String(reportNum)) return line;
     // PDF column is index 7
     if (cols[7]?.trim() === '❌') {
       cols[7] = ' ✅ ';
