@@ -15,6 +15,7 @@ import { join, resolve } from 'path';
 import {
   fillGreenhouse, fillLever, fillAshby, fillWorkday, fillGeneric,
   detectATS, loadAnswers, isWorkAuthLabel, workAuthAnswer, CAREER_OPS,
+  writeStatus, getLastAttach, resumeTierFromPath,
 } from './smart-apply.mjs';
 
 const CDP_URL  = 'http://localhost:9222';
@@ -344,8 +345,32 @@ async function fillPage(page, url, ats) {
     result = { outcome: 'ERROR', error: err.message };
   }
 
-  await injectBanner(page, result);
-  await setupAnswerCapture(page, job);
+  // Write apply-status.json FIRST — before injectBanner/setupAnswerCapture which
+  // can throw (e.g. page.exposeFunction fails if _coCapture was already exposed
+  // on this page from a prior fill). Status write must not be blocked by those
+  // failures. Use job.num (tracker display #) — same num smart-apply.mjs writes
+  // under, same num the dashboard's attach-tick placeholder is keyed by.
+  // (Tick B's validation.json uses the report-link num because that's the
+  // output folder naming convention — different file family, different key.)
+  if (job?.num) {
+    try {
+      writeStatus(job.num, result.outcome, {
+        url,
+        ats,
+        needsAnswer: result.needsAnswer || [],
+        error: result.error || null,
+        company: job.company || '',
+        role: job.role || '',
+        resumePath: resumePath ? resumePath.replace(CAREER_OPS + '/', '') : null,
+        resumeTier: resumeTierFromPath(resumePath),
+        attach: getLastAttach(),
+      });
+    } catch (e) { console.warn('[fill-agent] writeStatus failed:', e.message); }
+  }
+
+  await injectBanner(page, result).catch(e => console.warn('[fill-agent] injectBanner failed:', e.message));
+  await setupAnswerCapture(page, job).catch(e => console.warn('[fill-agent] setupAnswerCapture failed:', e.message));
+
   return result;
 }
 

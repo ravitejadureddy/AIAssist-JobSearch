@@ -20,8 +20,8 @@
  */
 
 import { chromium } from 'playwright';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join, resolve, dirname } from 'path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from 'fs';
+import { join, resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
@@ -37,6 +37,51 @@ export const APPLY_STATUS = {
   NEEDS_MANUAL:         'NEEDS_MANUAL',
   ERROR:                'ERROR',
 };
+
+// ─── Attach verification ──────────────────────────────────────────────────────
+// Module-level last-attach record. Each ATS handler calls attemptAttach() after
+// resolving its file input; main() reads getLastAttach() and writes it into
+// apply-status.json so the dashboard can render a ✓ on confirmed attaches.
+// Never throws — preserves the original "fill continues even if upload fails"
+// semantics across all 6 setInputFiles call sites.
+let _lastAttach = null;
+export function getLastAttach() { return _lastAttach; }
+export function resetLastAttach() { _lastAttach = null; }
+
+async function attemptAttach(fileInput, resumePath) {
+  if (!resumePath || !existsSync(resumePath)) { _lastAttach = null; return; }
+  const intendedName = basename(resumePath);
+  let intendedSize = null;
+  try { intendedSize = statSync(resumePath).size; } catch {}
+
+  try {
+    await fileInput.setInputFiles(resumePath);
+  } catch (e) {
+    _lastAttach = { attached: false, intendedName, path: resumePath, reason: `setInputFiles_error: ${e.message?.slice(0, 80)}` };
+    return;
+  }
+
+  let browserSide = null;
+  try {
+    browserSide = await fileInput.evaluate(el => {
+      const f = el.files?.[0];
+      return f ? { name: f.name, size: f.size } : null;
+    });
+  } catch { /* shadow DOM, detached input, or cross-origin frame */ }
+
+  if (browserSide) {
+    _lastAttach = {
+      attached: true,
+      intendedName,
+      attachedName: browserSide.name,
+      nameMatches: browserSide.name === intendedName,
+      sizeMatches: intendedSize != null ? browserSide.size === intendedSize : null,
+      path: resumePath,
+    };
+  } else {
+    _lastAttach = { attached: 'unknown', intendedName, path: resumePath, reason: 'no_browser_readback' };
+  }
+}
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -57,10 +102,19 @@ if (isMain && !numArg && !urlArg) {
 function statusDir()  { return join(CAREER_OPS, 'data', 'apply-status'); }
 function ssDir()      { return join(CAREER_OPS, 'data', 'apply-screenshots'); }
 
-function writeStatus(num, status, extra = {}) {
+export function writeStatus(num, status, extra = {}) {
   mkdirSync(statusDir(), { recursive: true });
   const path = join(statusDir(), `${num}.json`);
   writeFileSync(path, JSON.stringify({ num, status, updatedAt: new Date().toISOString(), ...extra }, null, 2));
+}
+
+// Derive resume tier from path. Matches dashboard-server.mjs:817-826 categories.
+export function resumeTierFromPath(path) {
+  if (!path) return null;
+  if (path.includes('/output/') && path.endsWith('/resume.pdf')) return 'tailored';
+  const m = path.match(/Resume\/([^/]+)\/resume\.pdf$/i);
+  if (m) return m[1].toLowerCase() === 'generic' ? 'generic' : 'archetype';
+  return null;
 }
 
 function readStatus(num) {
@@ -405,7 +459,7 @@ async function fillGreenhouse(page, job, answersData, resumePath) {
   if (resumePath && existsSync(resumePath)) {
     const fileInput = page.locator('input[type="file"]#resume, input[type="file"]').first();
     if (await fileInput.count() > 0) {
-      await fileInput.setInputFiles(resumePath);
+      await attemptAttach(fileInput, resumePath);
       await page.waitForTimeout(1500);
     }
   }
@@ -628,7 +682,7 @@ async function fillLever(page, job, answersData, resumePath) {
   if (resumePath && existsSync(resumePath)) {
     const fileInput = page.locator('input[type="file"]').first();
     if (await fileInput.count() > 0) {
-      await fileInput.setInputFiles(resumePath);
+      await attemptAttach(fileInput, resumePath);
       await page.waitForTimeout(1500);
     }
   }
@@ -713,7 +767,7 @@ async function fillAshby(page, job, answersData, resumePath) {
   if (resumePath && existsSync(resumePath)) {
     const fileInput = page.locator('input[type="file"]').first();
     if (await fileInput.count() > 0) {
-      await fileInput.setInputFiles(resumePath);
+      await attemptAttach(fileInput, resumePath);
       await page.waitForTimeout(1500);
     }
   }
@@ -940,7 +994,7 @@ async function fillWorkday(page, job, answersData, resumePath) {
   if (resumePath && existsSync(resumePath)) {
     const fileInput = page.locator('input[type="file"]').first();
     if (await fileInput.count() > 0) {
-      await fileInput.setInputFiles(resumePath).catch(() => {});
+      await attemptAttach(fileInput, resumePath);
       await page.waitForTimeout(2500);
       fieldsFound++;
     }
@@ -1164,7 +1218,7 @@ async function fillGeneric(page, job, answersData, resumePath) {
     if (f.type === 'file' && /resume|cv|attach/i.test(f.label + ' ' + (f.name || ''))) {
       if (resumePath && existsSync(resumePath) && f.selector) {
         try {
-          await page.locator(f.selector).first().setInputFiles(resumePath);
+          await attemptAttach(page.locator(f.selector).first(), resumePath);
           fieldsFilled++;
           await page.waitForTimeout(800);
         } catch {}
@@ -1312,7 +1366,7 @@ async function fillGeneric(page, job, answersData, resumePath) {
     try {
       const fileInput = page.locator('input[type="file"][name*="resume" i], input[type="file"][name*="cv" i], input[type="file"][id*="resume" i], input[type="file"][id*="cv" i]').first();
       if (await fileInput.count() > 0) {
-        await fileInput.setInputFiles(resumePath).catch(() => {});
+        await attemptAttach(fileInput, resumePath);
       }
     } catch {}
   }
@@ -1482,6 +1536,9 @@ if (isMain) (async () => {
     error: result.error || null,
     company: job?.company || '',
     role: job?.role || '',
+    resumePath: resumePath ? resumePath.replace(CAREER_OPS + '/', '') : null,
+    resumeTier: resumeTierFromPath(resumePath),
+    attach: getLastAttach(),
   });
 
   // In headed mode, keep browser open so user can review and submit manually.

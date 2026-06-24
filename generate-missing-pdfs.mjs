@@ -25,6 +25,7 @@ import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import { buildTailoredCv, loadProfile } from './build-tailored-cv.mjs';
+import { isQueueEligible } from './queue-eligibility.mjs';
 
 const CAREER_OPS   = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR  = join(CAREER_OPS, 'reports');
@@ -349,6 +350,29 @@ Do NOT produce any HTML. Do NOT explain. The script fills the template.`;
   });
 }
 
+// ─── Fire semantic validator for Apply Queue rows with H1B High/Med/Low ──────
+// Non-blocking, detached. validate-resume.mjs writes output/{num}-{slug}/validation.json.
+// If the row isn't in Apply Queue or H1B label isn't High/Med/Low, this no-ops.
+// Realistic concurrency: ~5-7 detached validators at any time (each ~60-90s,
+// PDF generation is ~10-180s/each). Well within Max 5x Haiku window. If a run
+// noticeably bumps the cap, add a serializing queue here.
+const _firedValidators = new Set();
+function fireValidationIfEligible(reportNum) {
+  try {
+    const key = String(reportNum);
+    if (_firedValidators.has(key)) return; // already fired in this run
+    const r = isQueueEligible(reportNum);
+    if (!r.eligible) return; // silent skip — not in Apply Queue or H1B not sponsor
+    _firedValidators.add(key);
+    const child = spawn(process.execPath, [join(CAREER_OPS, 'validate-resume.mjs'), key], {
+      cwd: CAREER_OPS,
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.unref();
+  } catch { /* validation failures must never block PDF generation */ }
+}
+
 // ─── Update tracker PDF column ✅ ──────────────────────────────────────────────
 function markTrackerPdfDone(reportNum) {
   if (!existsSync(TRACKER_FILE)) return;
@@ -403,6 +427,7 @@ function markTrackerPdfDone(reportNum) {
       if (result.success) {
         console.log('✅');
         markTrackerPdfDone(job.reportNum);
+        fireValidationIfEligible(job.reportNum);
         passed++;
       } else {
         console.log('❌');
@@ -415,6 +440,7 @@ function markTrackerPdfDone(reportNum) {
       if (result.success) {
         console.log('✅');
         markTrackerPdfDone(job.reportNum);
+        fireValidationIfEligible(job.reportNum);
         passed++;
       } else {
         console.log('❌');

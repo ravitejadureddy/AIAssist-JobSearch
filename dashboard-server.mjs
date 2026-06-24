@@ -11,7 +11,7 @@
  */
 
 import http from 'http';
-import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, watch } from 'fs';
 import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { exec, spawn } from 'child_process';
@@ -59,6 +59,74 @@ const GRACE_PERIOD_MS = 20000; // wait before starting the watchdog
 function broadcastSSE(obj) {
   const data = `data: ${JSON.stringify(obj)}\n\n`;
   for (const client of sseClients) { try { client.write(data); } catch {} }
+}
+
+// ─── Live tick updates — fs.watch on output/ and data/apply-status/ ──────────
+// When validate-resume.mjs writes output/{slug}/validation.json, broadcast SSE
+// so the dashboard updates the row's tick in place — no refresh needed.
+// Same for smart-apply.mjs / fill-agent.mjs writing data/apply-status/{num}.json.
+//
+// fs.watch fires multiple times per write (atomic-write pattern) — debounce per
+// num/file to coalesce into a single broadcast. macOS supports {recursive:true}.
+const _liveDebounce = new Map();
+function debouncedBroadcast(key, ms, fn) {
+  if (_liveDebounce.has(key)) clearTimeout(_liveDebounce.get(key));
+  _liveDebounce.set(key, setTimeout(() => { _liveDebounce.delete(key); fn(); }, ms));
+}
+
+// Module-level refs so the watchers aren't garbage-collected after setup returns.
+const _liveWatchers = [];
+
+function setupLiveTickWatchers() {
+  const outputDir = join(CAREER_OPS, 'output');
+  const statusDir = join(CAREER_OPS, 'data', 'apply-status');
+  mkdirSync(statusDir, { recursive: true });
+
+  // Tick B — validation.json events
+  if (existsSync(outputDir)) {
+    try {
+      const wOut = watch(outputDir, { recursive: true }, (eventType, filename) => {
+        if (!filename) return;
+        if (process.env.CO_LIVE_DEBUG) console.log(`[live-debug] output event=${eventType} filename=${filename}`);
+        // Path is relative to outputDir: "{num}-{slug}/validation.json"
+        const m = filename.replace(/\\/g, '/').match(/^(\d+)-[^/]+\/validation\.json$/);
+        if (!m) return;
+        const num = parseInt(m[1]);
+        const folder = join(outputDir, filename.split(/[\\/]/)[0]);
+        debouncedBroadcast(`val:${num}`, 300, () => {
+          const v = readValidation(folder);
+          if (v) {
+            if (process.env.CO_LIVE_DEBUG) console.log(`[live] broadcast validation ${num} score=${v.score}`);
+            broadcastSSE({ type: 'validation', num, validation: v });
+          }
+        });
+      });
+      wOut.on('error', err => console.warn('[live] output watch error:', err.message));
+      _liveWatchers.push(wOut);
+      console.log('[live] watching output/ for validation.json updates');
+    } catch (e) { console.warn('[live] could not watch output/:', e.message); }
+  }
+
+  // Tick A — apply-status/{num}.json events
+  try {
+    const wStatus = watch(statusDir, (eventType, filename) => {
+      if (!filename) return;
+      if (process.env.CO_LIVE_DEBUG) console.log(`[live-debug] apply-status event=${eventType} filename=${filename}`);
+      const m = filename.match(/^(\d+)\.json$/);
+      if (!m) return;
+      const num = parseInt(m[1]);
+      debouncedBroadcast(`apply:${num}`, 200, () => {
+        const st = readApplyStatus(num);
+        if (st) {
+          if (process.env.CO_LIVE_DEBUG) console.log(`[live] broadcast apply ${num}`);
+          broadcastSSE({ type: 'apply', num, fillStatus: st });
+        }
+      });
+    });
+    wStatus.on('error', err => console.warn('[live] status watch error:', err.message));
+    _liveWatchers.push(wStatus);
+    console.log('[live] watching data/apply-status/ for fill updates');
+  } catch (e) { console.warn('[live] could not watch apply-status/:', e.message); }
 }
 
 // ─── Parsers ──────────────────────────────────────────────────────────────────
@@ -535,6 +603,15 @@ function readApplyStatus(num) {
   try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; }
 }
 
+// Read output/{num}-{slug}/validation.json (written by validate-resume.mjs).
+// Returns null if not present — dashboard withholds the tick rather than misreport.
+function readValidation(outputFolder) {
+  if (!outputFolder) return null;
+  const p = join(outputFolder, 'validation.json');
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return null; }
+}
+
 function spawnSmartApply(num) {
   const scriptPath = join(CAREER_OPS, 'smart-apply.mjs');
   // Use osascript to open a new Terminal window — this gives the child process
@@ -825,6 +902,9 @@ function renderDashboard(apps, mode, pendingCount) {
       a.resumeTier = 'generic';
       a.resumeSource = 'generic';
     }
+    // Tick B source: semantic validation (only present for queue-eligible jobs
+    // where H1B is High/Med/Low AND validate-resume.mjs has run).
+    a.validation = readValidation(a.outputFolder);
   }
 
   const title = isQueue ? 'Apply Queue' : 'Full History ≥ 3.5';
@@ -853,6 +933,31 @@ function renderDashboard(apps, mode, pendingCount) {
         ? join(CAREER_OPS, 'Resume', a.resumeSource || 'generic')
         : join(CAREER_OPS, 'Resume', 'generic');
     const folderBtn = `<span class="icon-link" onclick="openFolder(this,'${esc(folderTarget)}')" title="${esc(tierTitle)}">📁</span><span style="font-size:0.7em;color:${tierColor};margin-left:2px" title="${esc(tierTitle)}">${esc(tierLabel)}</span>`;
+
+    // Tick B — semantic-validation tick. Shown only on Apply Queue tab, only
+    // when validation.json exists AND has a finite numeric score. Strict: ✓
+    // only if valid===true. Otherwise ⚠ with issues in tooltip. Withholds on
+    // missing/malformed data. Wrapped in #val-tick-{num} so client SSE handler
+    // can update it live as new validations land.
+    const valInner = (() => {
+      if (!isQueue || !a.validation) return '';
+      const v = a.validation;
+      const scoreNum = Number.isFinite(v.score) ? Math.round(v.score) : null;
+      if (scoreNum == null) return '';
+      const issuesText = (Array.isArray(v.issues) ? v.issues : []).map(i => `• ${i}`).join('\n');
+      const axesText = (v.axes && typeof v.axes === 'object')
+        ? Object.entries(v.axes).map(([k, val]) => `${k}: ${val}`).join(' · ')
+        : '';
+      const fullTitle = `Validator: ${v.valid === true ? 'PASS' : 'WITHHELD'} · score ${scoreNum}\n${axesText}${issuesText ? '\n\nIssues:\n' + issuesText : ''}`;
+      const color = v.valid === true ? '#16a34a' : '#d97706';
+      const sym = v.valid === true ? '✓' : '⚠';
+      return `<span style="color:${color};font-size:0.85em;margin-left:4px;font-weight:600" title="${esc(fullTitle)}">${sym} ${scoreNum}</span>`;
+    })();
+    // Canonical num = report-link num if present (matches what fs.watch sees in
+    // output/{num}-{slug}/validation.json). Tracker display # may drift; we
+    // align IDs with the file-path num so live SSE updates land on the right row.
+    const valIdNum = (a.reportPath?.match(/reports\/(\d+)-/)?.[1]) || a.num;
+    const validationTick = isQueue ? `<span id="val-tick-${valIdNum}">${valInner}</span>` : '';
 
     const reportFull = a.reportPath ? resolveReportPath(a.reportPath) : null;
     const reportOnDisk = reportFull && existsSync(reportFull);
@@ -892,6 +997,29 @@ function renderDashboard(apps, mode, pendingCount) {
       }
       return `<span class="fill-status ${st}" title="${title}">${label}</span>`;
     })() : '';
+
+    // Tick A — resume-path / attach verification tick. Wrapped in #attach-tick-{num}
+    // so client SSE handler can update it live when smart-apply / fill-agent
+    // writes apply-status.json. Strict: ✓ green only if browser confirmed the
+    // intended file (name + size). ⚠ amber if no readback. ⚠ red if rejected.
+    const attachInner = (() => {
+      if (!fillSt?.attach) return '';
+      const at = fillSt.attach;
+      const tierLine = fillSt.resumeTier ? `Tier: ${fillSt.resumeTier}\n` : '';
+      const intendedLine = at.intendedName ? `Intended: ${at.intendedName}\n` : '';
+      const attachedLine = at.attachedName ? `Attached: ${at.attachedName}\n` : '';
+      const reasonLine = at.reason ? `Reason: ${at.reason}` : '';
+      const ttl = `Attach verification\n${tierLine}${intendedLine}${attachedLine}${reasonLine}`;
+      if (at.attached === true && at.nameMatches && at.sizeMatches !== false) {
+        return `<span style="color:#16a34a;font-size:0.85em;margin-left:4px;font-weight:600" title="${esc(ttl)}">✓</span>`;
+      } else if (at.attached === 'unknown') {
+        return `<span style="color:#d97706;font-size:0.85em;margin-left:4px;font-weight:600" title="${esc(ttl)}">⚠</span>`;
+      } else if (at.attached === false) {
+        return `<span style="color:#dc2626;font-size:0.85em;margin-left:4px;font-weight:600" title="${esc(ttl)}">⚠</span>`;
+      }
+      return '';
+    })();
+    const attachTick = `<span id="attach-tick-${a.num}">${attachInner}</span>`;
     const isLinkedIn = a.jobUrl?.includes('linkedin.com');
     const agentActive = agentStatus === 'connected';
     const editUrlBtn = `<button class="edit-url-btn" onclick="editUrl(this,${a.num},'${esc(a.jobUrl||'')}')" title="Set real career page URL (replaces LinkedIn URL in report)">✎</button>`;
@@ -929,7 +1057,7 @@ function renderDashboard(apps, mode, pendingCount) {
              <button onclick="saveUrl(${a.num})" style="background:#1d4ed8;border:none;color:#fff;padding:3px 8px;border-radius:4px;font-size:0.75em;cursor:pointer;margin-left:2px">Save</button>
              <button onclick="cancelEditUrl(${a.num})" style="background:#334155;border:none;color:#cbd5e1;padding:3px 8px;border-radius:4px;font-size:0.75em;cursor:pointer;margin-left:2px">✕</button>
            </div>
-           <div id="fill-badge-${a.num}" style="min-height:16px;text-align:center">${isLinkedIn ? '' : fillStatusBadge}</div>
+           <div id="fill-badge-${a.num}" style="min-height:16px;text-align:center">${isLinkedIn ? '' : fillStatusBadge}${isLinkedIn ? '' : attachTick}</div>
          </div>`
       : `<span style="color:#334155;font-size:0.8em">—</span>`;
 
@@ -961,7 +1089,7 @@ function renderDashboard(apps, mode, pendingCount) {
   <td>${salaryCell}</td>
   <td id="status-${a.num}">${statusBadge}</td>
   <td style="text-align:center">${jobLink}</td>
-  <td style="text-align:center">${folderBtn}</td>
+  <td style="text-align:center">${folderBtn}${validationTick}</td>
   <td style="text-align:center" id="cover-${a.num}">${coverCell}</td>
   <td style="text-align:center">${reportLink}</td>
   <td class="notes-cell" onclick="this.classList.toggle('expanded')">${esc(a.notes) || '—'}</td>
@@ -1097,9 +1225,51 @@ function openFill(num, jobUrl) {
           banner.innerHTML = \`✅ Resumes ready: <strong>\${d.done}</strong> generated\${d.failed > 0 ? \` · \${d.failed} failed\` : ''}  — reloading…\`;
           setTimeout(() => location.reload(), 2000);
         }
+      } else if (d.type === 'validation') {
+        // Tick B live update — render a fresh tick and swap into the placeholder.
+        const el = document.getElementById('val-tick-' + d.num);
+        if (el) el.innerHTML = renderValidationTick(d.validation);
+      } else if (d.type === 'apply') {
+        // Tick A live update — fillStatus has the new attach + resumeTier fields.
+        const el = document.getElementById('attach-tick-' + d.num);
+        if (el) el.innerHTML = renderAttachTick(d.fillStatus);
       }
     } catch {}
   };
+
+  // ── Client-side tick renderers — mirror the server's HTML so SSE updates
+  // produce visually identical output to a fresh page load.
+  function escAttr(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function renderValidationTick(v) {
+    if (!v || typeof v !== 'object') return '';
+    const scoreNum = Number.isFinite(v.score) ? Math.round(v.score) : null;
+    if (scoreNum == null) return '';
+    const issues = Array.isArray(v.issues) ? v.issues.map(i => '• ' + i).join('\\n') : '';
+    const axes = (v.axes && typeof v.axes === 'object')
+      ? Object.entries(v.axes).map(([k, val]) => k + ': ' + val).join(' · ')
+      : '';
+    const ttl = 'Validator: ' + (v.valid === true ? 'PASS' : 'WITHHELD') + ' · score ' + scoreNum + '\\n' + axes + (issues ? '\\n\\nIssues:\\n' + issues : '');
+    const color = v.valid === true ? '#16a34a' : '#d97706';
+    const sym = v.valid === true ? '✓' : '⚠';
+    return '<span style="color:' + color + ';font-size:0.85em;margin-left:4px;font-weight:600" title="' + escAttr(ttl) + '">' + sym + ' ' + scoreNum + '</span>';
+  }
+  function renderAttachTick(fillSt) {
+    const at = fillSt?.attach;
+    if (!at) return '';
+    const tierLine = fillSt.resumeTier ? 'Tier: ' + fillSt.resumeTier + '\\n' : '';
+    const intendedLine = at.intendedName ? 'Intended: ' + at.intendedName + '\\n' : '';
+    const attachedLine = at.attachedName ? 'Attached: ' + at.attachedName + '\\n' : '';
+    const reasonLine = at.reason ? 'Reason: ' + at.reason : '';
+    const ttl = 'Attach verification\\n' + tierLine + intendedLine + attachedLine + reasonLine;
+    if (at.attached === true && at.nameMatches && at.sizeMatches !== false) {
+      return '<span style="color:#16a34a;font-size:0.85em;margin-left:4px;font-weight:600" title="' + escAttr(ttl) + '">✓</span>';
+    } else if (at.attached === 'unknown') {
+      return '<span style="color:#d97706;font-size:0.85em;margin-left:4px;font-weight:600" title="' + escAttr(ttl) + '">⚠</span>';
+    } else if (at.attached === false) {
+      return '<span style="color:#dc2626;font-size:0.85em;margin-left:4px;font-weight:600" title="' + escAttr(ttl) + '">⚠</span>';
+    }
+    return '';
+  }
 
   // One-shot fetch on page load: render the banner from current backfill state
   // immediately, instead of waiting for the next SSE event (which only fires
@@ -1937,6 +2107,10 @@ server.listen(PORT, HOST, () => {
   const url = `http://${HOST}:${PORT}`;
   console.log(`Career Ops Dashboard → ${url}`);
   console.log('Press Ctrl+C to stop.\n');
+
+  // Live tick updates: fs.watch the output/ and apply-status/ folders so
+  // validation.json + apply-status writes broadcast SSE → dashboard updates in place.
+  setupLiveTickWatchers();
 
   // Auto-start PDF backfill after 10s (let fill-agent connect and Chrome settle first)
   setTimeout(() => startPdfBackfill(), 10000);
