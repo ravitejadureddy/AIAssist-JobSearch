@@ -597,7 +597,9 @@ p{margin:0 0 18px}
 Total letter body: 270-300 words. Write the file only — no commentary, no explanation.`;
 
   // Hard-coded absolute path — Mac .app / launchd ship an empty PATH.
-  const child = spawn('/usr/local/bin/claude', ['-p', prompt], {
+  // Opus 4.7 explicit: cover letter is highest-stakes single doc per application.
+  // User-triggered only (one letter per click), so Max 5x Opus cap is negligible.
+  const child = spawn('/usr/local/bin/claude', ['-p', '--model', 'claude-opus-4-7', prompt], {
     cwd: CAREER_OPS,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env },

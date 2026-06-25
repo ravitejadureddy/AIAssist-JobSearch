@@ -293,7 +293,9 @@ If it does not exist, print only: JSON_FAILED
 Do NOT produce any HTML. Do NOT explain. The script fills the template.`;
 
     // Hard-coded absolute path — Mac .app / launchd contexts ship an empty PATH.
-    const child = spawn('/usr/local/bin/claude', ['-p', '--dangerously-skip-permissions', prompt], {
+    // Opus 4.7 explicit: best constraint-following + proof-point selection for tailored CVs.
+    // Stays well within Max 5x weekly Opus cap (~30 CVs/day × ~60s ≈ 30 min/day).
+    const child = spawn('/usr/local/bin/claude', ['-p', '--model', 'claude-opus-4-7', '--dangerously-skip-permissions', prompt], {
       cwd: CAREER_OPS,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
