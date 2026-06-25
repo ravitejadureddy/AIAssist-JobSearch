@@ -1024,26 +1024,27 @@ function renderDashboard(apps, mode, pendingCount) {
     const agentActive = agentStatus === 'connected';
     const editUrlBtn = `<button class="edit-url-btn" onclick="editUrl(this,${a.num},'${esc(a.jobUrl||'')}')" title="Set real career page URL (replaces LinkedIn URL in report)">✎</button>`;
 
+    // Unified action: always render "🌐 Open" when a URL is available. The
+    // click dispatcher (openJob) decides at click time whether to:
+    //   - use the connected fill-agent Chrome (auto-fills the form),
+    //   - open the LinkedIn URL in a new tab (LinkedIn requires the user to
+    //     click "Apply on company website"; nothing to auto-fill upstream),
+    //   - or fall back to smart-apply (spawns Playwright in a new Terminal).
+    // The user only sees one button. Fallback behavior is invisible.
     let fillOrLinkedIn;
-    if (agentActive && a.jobUrl) {
-      // Fill Agent connected: one primary "Open" button. Same behavior regardless of
-      // host — opens in the fill-agent Chrome. ATS pages fill automatically; LinkedIn
-      // requires user to click Apply on the company website (handler fires after that).
+    if (a.jobUrl) {
+      const isRunning = fillSt?.status === 'RUNNING';
+      const label = isRunning ? '⏳ Filling…' : '🌐 Open';
+      const disabled = isRunning ? 'disabled' : '';
       const openTitle = isLinkedIn
-        ? 'Open in Fill Agent Chrome — log in and click Apply on company website; form fills automatically'
-        : 'Open in Fill Agent Chrome — form fills automatically';
-      fillOrLinkedIn = `<button class="fill-btn" onclick="openFill(${a.num},'${esc(a.jobUrl)}')"
-          title="${esc(openTitle)}" style="background:#1e3a5f;border-color:#3b82f6;color:#93c5fd">🌐 Open</button>${isLinkedIn ? editUrlBtn : ''}`;
-    } else if (isLinkedIn) {
-      // No agent: show LinkedIn link + ✎ override
-      fillOrLinkedIn = `<a href="${esc(a.jobUrl)}" target="_blank" class="linkedin-btn"
-          title="LinkedIn — click to open. Use ✎ to set the real apply URL.">LinkedIn →</a>${editUrlBtn}`;
+        ? 'Open the LinkedIn job — log in and click Apply on company website; form fills automatically when reached'
+        : 'Open the job — auto-fills if Fill Agent is connected, otherwise launches via Playwright';
+      fillOrLinkedIn = `<button class="fill-btn" id="action-btn-${a.num}"
+          onclick="openJob(this,${a.num},'${esc(a.jobUrl)}',${isLinkedIn ? 'true' : 'false'})"
+          title="${esc(openTitle)}" ${disabled}
+          style="background:#1e3a5f;border-color:#3b82f6;color:#93c5fd">${label}</button>${isLinkedIn ? editUrlBtn : ''}`;
     } else {
-      // No agent, ATS job: classic Playwright fill
-      const fillBtnLabel = fillSt?.status === 'RUNNING' ? '⏳ Filling…' : '⚡ Fill';
-      const fillBtnDisabled = fillSt?.status === 'RUNNING' ? 'disabled' : '';
-      fillOrLinkedIn = `<button class="fill-btn" onclick="fillApplication(this,${a.num})"
-          title="Open browser and auto-fill the form" ${fillBtnDisabled}>${fillBtnLabel}</button>`;
+      fillOrLinkedIn = `<span style="color:#f59e0b;font-size:0.78em" title="Report has no URL — set it via ✎">⚠ No URL</span>${editUrlBtn}`;
     }
     const actionCell = a.status === 'Evaluated'
       ? `<div style="display:flex;flex-direction:column;align-items:center;gap:4px">
@@ -1175,6 +1176,31 @@ function openFill(num, jobUrl) {
   .catch(() => alert('Request failed'));
 }
 
+// Unified click dispatcher for the "🌐 Open" action button. Picks the right
+// underlying mechanism at click time based on fill-agent connection + URL kind.
+// User sees one button label; the dispatch is invisible.
+async function openJob(el, num, jobUrl, isLinkedIn) {
+  let agentConnected = false;
+  try {
+    const r = await fetch('/fill-agent-status').then(r => r.json());
+    agentConnected = r.status === 'connected';
+  } catch {}
+
+  if (agentConnected) {
+    // Preferred: fill-agent Chrome opens the URL and auto-fills.
+    openFill(num, jobUrl);
+    return;
+  }
+  if (isLinkedIn) {
+    // Fill-agent off: LinkedIn can't be auto-filled anyway, just open the link.
+    window.open(jobUrl, '_blank');
+    return;
+  }
+  // Fill-agent off + ATS URL: fall back to smart-apply (spawns Playwright in
+  // a new Terminal). fillApplication() handles button label + polling.
+  fillApplication(el, num);
+}
+
 // Live agent status badge updates via SSE
 (function() {
   const dot   = document.getElementById('agent-dot');
@@ -1182,8 +1208,9 @@ function openFill(num, jobUrl) {
   const badge = document.getElementById('agent-badge');
   // Capture the agent's state at page-load time. If it was disconnected
   // server-side (the "Launch Browser" button rendered), the action-column
-  // buttons were drawn as ⚡ Fill (smart-apply path). When the agent
-  // subsequently connects, those buttons are stale — reload to re-render.
+  // buttons rendered as 🌐 Open with the smart-apply fallback dispatch.
+  // When the agent subsequently connects, behavior auto-upgrades on click —
+  // no reload needed. Reload kept as a safety for badge visibility.
   const pageLoadedDisconnected = !!badge?.querySelector('button');
   const _es = window._agentES || (window._agentES = new EventSource('/events'));
   _es.onmessage = ev => {
@@ -1442,12 +1469,12 @@ function fillApplication(el, num) {
     if (data.ok) {
       pollFillStatus(num, el);
     } else {
-      el.textContent = '⚡ Fill';
+      el.textContent = '🌐 Open';
       el.disabled = false;
       el.title = data.error || 'Failed to launch';
     }
   })
-  .catch(() => { el.textContent = '⚡ Fill'; el.disabled = false; });
+  .catch(() => { el.textContent = '🌐 Open'; el.disabled = false; });
 }
 function pollFillStatus(num, el) {
   const FILL_STATUS_LABELS = {
@@ -1478,7 +1505,7 @@ function pollFillStatus(num, el) {
           return;
         }
         if (el) {
-          el.textContent = '⚡ Fill';
+          el.textContent = '🌐 Open';
           el.disabled = false;
         }
         const badgeWrap = document.getElementById('fill-badge-' + num);
