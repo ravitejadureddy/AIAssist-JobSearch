@@ -92,6 +92,11 @@ function findResume(job) {
 }
 
 // ── In-page status banner ─────────────────────────────────────────────────────
+// Module-level reference to the singleton FillAgent — set in the constructor.
+// Used by injectBanner's exposed callbacks to call pause()/resume() without
+// having to thread the agent instance through every function.
+let _instance = null;
+
 async function injectBanner(page, result) {
   const fieldsFound = result.fieldsFound ?? 0;
   const needsCount  = result.needsAnswer?.length ?? 0;
@@ -117,7 +122,27 @@ async function injectBanner(page, result) {
     msg += `  ▶ Multi-step form: after reviewing, click "${result.nextLabel}" to advance.`;
   }
 
-  await page.evaluate(({ msg, bgColor, needsAnswer }) => {
+  // Expose Node callbacks for the banner's Fill Now + Pause buttons. Once per
+  // page only — exposeFunction throws on a second call. `page._coCtrlExposed`
+  // flag prevents that. Each callback returns the new state so the banner can
+  // update its UI without a round-trip.
+  if (!page._coCtrlExposed) {
+    try {
+      await page.exposeFunction('_coFillNow', async () => {
+        if (!_instance) return { ok: false };
+        return _instance.triggerFill();
+      });
+      await page.exposeFunction('_coTogglePause', async () => {
+        if (!_instance) return { paused: false };
+        if (_instance.paused) _instance.resume(); else _instance.pause();
+        return { paused: _instance.paused };
+      });
+      page._coCtrlExposed = true;
+    } catch { /* already exposed on a previous fill cycle */ }
+  }
+
+  const paused = _instance?.paused ?? false;
+  await page.evaluate(({ msg, bgColor, needsAnswer, paused }) => {
     document.getElementById('_co_banner')?.remove();
     const el = document.createElement('div');
     el.id = '_co_banner';
@@ -127,10 +152,45 @@ async function injectBanner(page, result) {
       'font:600 13px/1.4 -apple-system,sans-serif', 'display:flex',
       'align-items:center', 'gap:10px', 'box-shadow:0 2px 8px rgba(0,0,0,.4)',
     ].join(';');
-    el.textContent = msg;
+    const msgSpan = document.createElement('span');
+    msgSpan.textContent = msg;
+    msgSpan.style.flex = '1';
+    el.appendChild(msgSpan);
+
+    const btnStyle = 'background:rgba(255,255,255,.18);border:none;color:#fff;cursor:pointer;font-size:12px;font-weight:600;padding:5px 10px;border-radius:5px;line-height:1';
+    // 🔄 Fill Now — re-runs fillPage on current URL bypassing debounce + filters
+    const fillBtn = document.createElement('button');
+    fillBtn.id = '_co_fill_now_btn';
+    fillBtn.textContent = '🔄 Fill Now';
+    fillBtn.title = 'Re-run fill on this page right now';
+    fillBtn.style.cssText = btnStyle;
+    fillBtn.onclick = async () => {
+      fillBtn.disabled = true;
+      const orig = fillBtn.textContent;
+      fillBtn.textContent = '⏳ Filling…';
+      try { await window._coFillNow?.(); } catch {}
+      setTimeout(() => { fillBtn.textContent = orig; fillBtn.disabled = false; }, 2000);
+    };
+    el.appendChild(fillBtn);
+
+    // ⏸ Pause / ▶ Resume — toggles fill-agent auto-fire
+    const pauseBtn = document.createElement('button');
+    pauseBtn.id = '_co_pause_btn';
+    pauseBtn.textContent = paused ? '▶ Resume' : '⏸ Pause';
+    pauseBtn.title = 'Toggle fill-agent auto-fire on future page loads';
+    pauseBtn.style.cssText = btnStyle;
+    pauseBtn.onclick = async () => {
+      try {
+        const r = await window._coTogglePause?.();
+        pauseBtn.textContent = r?.paused ? '▶ Resume' : '⏸ Pause';
+      } catch {}
+    };
+    el.appendChild(pauseBtn);
+
     const x = document.createElement('button');
     x.textContent = '✕';
-    x.style.cssText = 'margin-left:auto;background:none;border:none;color:#fff;cursor:pointer;font-size:16px;padding:0 4px';
+    x.title = 'Dismiss banner (does not stop fill-agent)';
+    x.style.cssText = 'background:none;border:none;color:#fff;cursor:pointer;font-size:16px;padding:0 4px';
     x.onclick = () => el.remove();
     el.appendChild(x);
     document.body.prepend(el);
@@ -147,7 +207,7 @@ async function injectBanner(page, result) {
         });
       });
     }
-  }, { msg, bgColor, needsAnswer: result.needsAnswer || [] }).catch(() => {});
+  }, { msg, bgColor, needsAnswer: result.needsAnswer || [], paused }).catch(() => {});
 }
 
 // ── Answer capture — fires when user submits the form ────────────────────────
@@ -416,8 +476,35 @@ class FillAgent {
   constructor() {
     this.browser   = null;
     this.connected = false;
+    this._paused   = false;        // user can pause via banner / dashboard
     this._listeners = new Set();
     this._pendingPages = new Set(); // debounce rapid navigations
+    this._lastWatchedPage = null;  // most recent page that fired the watcher (for /fill-now)
+    _instance = this;              // for module-level access from injectBanner callbacks
+  }
+
+  pause()  { this._paused = true;  this._emit({ type: 'paused' });  console.log('[fill-agent] paused');  }
+  resume() { this._paused = false; this._emit({ type: 'resumed' }); console.log('[fill-agent] resumed'); }
+  get paused() { return this._paused; }
+
+  // Manually fire fillPage on the most recently watched page — used by
+  // "🔄 Fill Now" button on the in-page banner and /fillagent/fill-now endpoint.
+  // Bypasses URL filters + debounce. Safe no-op if no page is being watched.
+  async triggerFill() {
+    if (!this._lastWatchedPage) return { ok: false, error: 'No active page' };
+    const page = this._lastWatchedPage;
+    let url;
+    try { url = page.url(); } catch { return { ok: false, error: 'Stale page' }; }
+    const ats = detectATS(url);
+    console.log(`[fill-agent] manual Fill Now → ${ats} on ${url}`);
+    try {
+      const result = await fillPage(page, url, ats);
+      console.log(`[fill-agent] manual fill → ${result.outcome}`);
+      return { ok: true, outcome: result.outcome };
+    } catch (e) {
+      console.warn('[fill-agent] manual fill error:', e.message);
+      return { ok: false, error: e.message };
+    }
   }
 
   on(cb) { this._listeners.add(cb); return () => this._listeners.delete(cb); }
@@ -455,6 +542,14 @@ class FillAgent {
       if (frame !== page.mainFrame()) return;
       const url = frame.url();
       if (!shouldWatch(url)) return;
+      // Track this page so "Fill Now" / triggerFill() knows what to act on.
+      this._lastWatchedPage = page;
+      // User-controlled pause: skip auto-fire entirely, but still track the page
+      // so that Fill Now still works when they want a manual trigger.
+      if (this._paused) {
+        console.log(`[fill-agent] (paused) skipping auto-fire on ${url}`);
+        return;
+      }
 
       // Debounce: if the same page fires multiple navigations in quick succession
       // (Workday does this during its multi-step flow), only process the final one
@@ -462,6 +557,8 @@ class FillAgent {
       await new Promise(r => setTimeout(r, 3500));
       if (!this._pendingPages.has(page)) return; // superseded
       this._pendingPages.delete(page);
+      // Re-check pause after debounce in case user paused mid-debounce.
+      if (this._paused) return;
 
       const ats = detectATS(url);
       this._emit({ type: 'filling', url, ats });

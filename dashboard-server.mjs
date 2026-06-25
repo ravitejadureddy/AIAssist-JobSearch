@@ -1191,9 +1191,9 @@ function renderDashboard(apps, mode, pendingCount) {
   </div>
   <div class="topbar-right" style="display:flex;align-items:center;gap:12px">
     <div id="agent-badge" style="display:flex;align-items:center;gap:6px;font-size:0.8em">
-      <span id="agent-dot" style="width:8px;height:8px;border-radius:50%;background:${agentStatus === 'connected' ? '#22c55e' : '#475569'};display:inline-block"></span>
-      <span id="agent-label" style="color:${agentStatus === 'connected' ? '#86efac' : '#64748b'}">${agentStatus === 'connected' ? 'Fill Agent: Active' : 'Fill Agent: Off'}</span>
-      ${agentStatus !== 'connected' ? `<button onclick="launchBrowser()" style="background:#1e3a5f;border:1px solid #3b82f6;color:#93c5fd;padding:3px 10px;border-radius:5px;font-size:0.9em;cursor:pointer">Launch Browser</button>` : ''}
+      <span id="agent-dot" style="width:8px;height:8px;border-radius:50%;background:${agentStatus === 'connected' ? (fillAgent.paused ? '#d97706' : '#22c55e') : '#475569'};display:inline-block"></span>
+      <span id="agent-label" style="color:${agentStatus === 'connected' ? (fillAgent.paused ? '#fbbf24' : '#86efac') : '#64748b'}">${agentStatus === 'connected' ? (fillAgent.paused ? 'Fill Agent: Paused' : 'Fill Agent: Active') : 'Fill Agent: Off'}</span>
+      ${agentStatus !== 'connected' ? `<button onclick="launchBrowser()" style="background:#1e3a5f;border:1px solid #3b82f6;color:#93c5fd;padding:3px 10px;border-radius:5px;font-size:0.9em;cursor:pointer">Launch Browser</button>` : `<button id="agent-pause-btn" onclick="toggleAgentPause()" style="background:#1e293b;border:1px solid #475569;color:#cbd5e1;padding:2px 8px;border-radius:4px;font-size:0.9em;cursor:pointer">${fillAgent.paused ? '▶' : '⏸'}</button>`}
     </div>
     ${tabBar(isQueue ? 'queue' : 'history', queueCount, historyCount, pendingCount)}
   </div>
@@ -1240,6 +1240,29 @@ function launchBrowser() {
       if (d.status === 'connected' || ++tries > 15) { clearInterval(poll); location.reload(); }
     }).catch(() => {});
   }, 1500);
+}
+
+// Toggle fill-agent pause/resume from the topbar badge. Updates the dot color,
+// label text, and button glyph from the server response so we never get out of
+// sync with the actual fill-agent state.
+function toggleAgentPause() {
+  fetch('/fill-agent-status').then(r => r.json()).then(d => {
+    const next = d.paused ? '/fillagent/resume' : '/fillagent/pause';
+    return fetch(next, { method: 'POST' });
+  }).then(r => r.json()).then(d => {
+    const dot = document.getElementById('agent-dot');
+    const label = document.getElementById('agent-label');
+    const btn = document.getElementById('agent-pause-btn');
+    if (d.paused) {
+      if (dot)   dot.style.background = '#d97706';
+      if (label) { label.style.color = '#fbbf24'; label.textContent = 'Fill Agent: Paused'; }
+      if (btn)   btn.textContent = '▶';
+    } else {
+      if (dot)   dot.style.background = '#22c55e';
+      if (label) { label.style.color = '#86efac'; label.textContent = 'Fill Agent: Active'; }
+      if (btn)   btn.textContent = '⏸';
+    }
+  }).catch(() => {});
 }
 
 function openFill(num, jobUrl) {
@@ -2022,7 +2045,30 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/fill-agent-status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: agentStatus }));
+    res.end(JSON.stringify({ status: agentStatus, paused: fillAgent.paused }));
+    return;
+  }
+
+  // Manual fill-agent controls — pause/resume auto-fire + trigger fill on current page
+  if (url.pathname === '/fillagent/pause' && req.method === 'POST') {
+    fillAgent.pause();
+    broadcastSSE({ type: 'agent', status: agentStatus, paused: true });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, paused: true }));
+    return;
+  }
+  if (url.pathname === '/fillagent/resume' && req.method === 'POST') {
+    fillAgent.resume();
+    broadcastSSE({ type: 'agent', status: agentStatus, paused: false });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, paused: false }));
+    return;
+  }
+  if (url.pathname === '/fillagent/fill-now' && req.method === 'POST') {
+    fillAgent.triggerFill().then(result => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    });
     return;
   }
 
