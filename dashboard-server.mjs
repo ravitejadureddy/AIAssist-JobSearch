@@ -746,7 +746,32 @@ function inlinemd(s) {
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
 }
 
-// ─── Status updater ───────────────────────────────────────────────────────────
+// ─── Status updater + sidecar meta (when each row's status last changed) ─────
+// data/applications-meta.json keyed by report-link num. Used to sort History
+// tab so the rows the user *just clicked* (Applied / Discarded / Reverted)
+// bubble to the top — independent of the row's original evaluation date.
+
+const APP_META_PATH = join(CAREER_OPS, 'data', 'applications-meta.json');
+
+function readApplicationsMeta() {
+  if (!existsSync(APP_META_PATH)) return {};
+  try { return JSON.parse(readFileSync(APP_META_PATH, 'utf-8')); }
+  catch { return {}; }
+}
+
+function writeApplicationsMeta(meta) {
+  try { writeFileSync(APP_META_PATH, JSON.stringify(meta, null, 2)); }
+  catch (e) { console.warn('[meta] write failed:', e.message); }
+}
+
+function recordStatusChange(num, newStatus) {
+  const meta = readApplicationsMeta();
+  meta[String(num)] = {
+    last_changed_at: new Date().toISOString(),
+    last_change_to: newStatus,
+  };
+  writeApplicationsMeta(meta);
+}
 
 function updateApplicationStatus(num, newStatus) {
   const path = join(CAREER_OPS, 'data', 'applications.md');
@@ -762,6 +787,12 @@ function updateApplicationStatus(num, newStatus) {
     parts[6] = ` ${newStatus} `;
     lines[i] = parts.join('|');
     writeFileSync(path, lines.join('\n'), 'utf-8');
+    // Record the change timestamp in the sidecar — used by History sort.
+    // Also key by reportNum (canonical) since dashboard uses that to display.
+    const reportLink = parts[8] || '';
+    const reportNum = (reportLink.match(/\[(\d+)\]/) || [])[1];
+    recordStatusChange(num, newStatus);
+    if (reportNum && reportNum !== String(num)) recordStatusChange(reportNum, newStatus);
     return { ok: true };
   }
   return { ok: false, error: 'Row not found' };
@@ -897,6 +928,9 @@ function renderDashboard(apps, mode, pendingCount) {
   const isQueue = mode === 'queue' || mode === 'queue';
 
   const cutoff = isQueue ? businessDayCutoff(3) : null;
+  // Load sidecar meta so we can sort by "when this row was last clicked".
+  // Keys are the display # (and report num — recordStatusChange writes both).
+  const appsMeta = readApplicationsMeta();
   const filtered = apps
     .filter(a => {
       // SKIP is permanent "don't apply"; it's deliberately hidden everywhere.
@@ -908,7 +942,15 @@ function renderDashboard(apps, mode, pendingCount) {
       if (cutoff && a.date && a.date < cutoff) return false;
       return true;
     })
-    .sort((a, b) => b.date.localeCompare(a.date) || b.scoreVal - a.scoreVal);
+    // Sort key: use last_changed_at if present (most recently clicked first),
+    // otherwise fall back to the row's evaluation date. Tie-break by score desc.
+    // Effect: rows you JUST clicked Applied / Skip / Revert on bubble to top.
+    .map(a => {
+      const m = appsMeta[String(a.num)] || appsMeta[String(a.reportNum)];
+      a._sortKey = m?.last_changed_at || (a.date ? a.date + 'T00:00:00Z' : '0000-01-01T00:00:00Z');
+      return a;
+    })
+    .sort((a, b) => b._sortKey.localeCompare(a._sortKey) || b.scoreVal - a.scoreVal);
 
   // Tab badge counts MUST match the rendered table:
   // - Apply Queue: Evaluated + score ≥ 3.5 + last 3 business days (same as rendered)
