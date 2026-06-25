@@ -325,6 +325,34 @@ function startPdfBackfill() {
   });
 }
 
+// ─── Validation backfill — auto-validate Apply Queue rows that have a PDF ────
+// but no validation.json yet AND are H1B-eligible (High/Med/Low). Closes the
+// gap for rows whose PDFs predated the validator. Runs detached; backfill-
+// validation.mjs already throttles serially (~75s per Haiku call). Live tick
+// updates land via the existing fs.watch → SSE pipeline.
+let validationBackfillProc = null;
+function startValidationBackfill() {
+  if (validationBackfillProc) return;
+  console.log('[val-backfill] Auto-starting validation backfill for eligible queue rows…');
+  const child = spawn(process.execPath, [join(CAREER_OPS, 'backfill-validation.mjs')], {
+    cwd: CAREER_OPS,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env },
+  });
+  validationBackfillProc = child;
+  child.stdout.on('data', d => {
+    for (const line of d.toString().split('\n')) {
+      if (line.trim()) console.log('[val-backfill]', line.trim().slice(0, 200));
+    }
+  });
+  child.stderr.on('data', d => { const t = d.toString().trim(); if (t) console.warn('[val-backfill]', t.slice(0, 300)); });
+  child.on('close', code => {
+    validationBackfillProc = null;
+    console.log(`[val-backfill] Complete (exit ${code}).`);
+  });
+  child.on('error', err => { console.warn('[val-backfill] spawn error:', err.message); validationBackfillProc = null; });
+}
+
 // ─── Pipeline pending parser ──────────────────────────────────────────────────
 
 function parsePending() {
@@ -1042,7 +1070,7 @@ function renderDashboard(apps, mode, pendingCount) {
       fillOrLinkedIn = `<button class="fill-btn" id="action-btn-${a.num}"
           onclick="openJob(this,${a.num},'${esc(a.jobUrl)}',${isLinkedIn ? 'true' : 'false'})"
           title="${esc(openTitle)}" ${disabled}
-          style="background:#1e3a5f;border-color:#3b82f6;color:#93c5fd">${label}</button>${isLinkedIn ? editUrlBtn : ''}`;
+          style="background:#1e3a5f;border-color:#3b82f6;color:#93c5fd">${label}</button>`;
     } else {
       fillOrLinkedIn = `<span style="color:#f59e0b;font-size:0.78em" title="Report has no URL — set it via ✎">⚠ No URL</span>${editUrlBtn}`;
     }
@@ -2024,6 +2052,13 @@ server.listen(PORT, HOST, () => {
 
   // Auto-start PDF backfill after 10s (let fill-agent connect and Chrome settle first)
   setTimeout(() => startPdfBackfill(), 10000);
+
+  // Auto-start validation backfill after 20s. Runs in parallel to PDF backfill
+  // — covers rows that already have tailored PDFs but no validation.json yet
+  // (e.g. PDFs generated before the validator existed). New PDFs being created
+  // by the PDF backfill above are handled separately by the per-PDF hook in
+  // generate-missing-pdfs.mjs (fireValidationIfEligible).
+  setTimeout(() => startValidationBackfill(), 20000);
 
   // Watchdog: shut down when the browser tab is closed (heartbeat stops).
   // Exception: if the PDF backfill is currently running, keep the server
