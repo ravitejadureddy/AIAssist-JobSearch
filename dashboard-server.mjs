@@ -899,9 +899,12 @@ function renderDashboard(apps, mode, pendingCount) {
   const cutoff = isQueue ? businessDayCutoff(3) : null;
   const filtered = apps
     .filter(a => {
-      if (a.status === 'SKIP' || a.status === 'Discarded') return false;
+      // SKIP is permanent "don't apply"; it's deliberately hidden everywhere.
+      // Discarded shows on History tab so accidental Skip clicks are recoverable via ↩.
+      if (a.status === 'SKIP') return false;
       if (a.scoreVal === null || a.scoreVal < 3.5) return false;
       if (isQueue && a.status !== 'Evaluated') return false;
+      if (isQueue && a.status === 'Discarded') return false; // never on Apply Queue
       if (cutoff && a.date && a.date < cutoff) return false;
       return true;
     })
@@ -909,10 +912,10 @@ function renderDashboard(apps, mode, pendingCount) {
 
   // Tab badge counts MUST match the rendered table:
   // - Apply Queue: Evaluated + score ≥ 3.5 + last 3 business days (same as rendered)
-  // - History: all active statuses + score ≥ 3.5 (no date cutoff)
+  // - History: all statuses except SKIP + score ≥ 3.5 (Discarded included for revert)
   const queueCutoff = businessDayCutoff(3);
   const queueCount = apps.filter(a => a.status === 'Evaluated' && a.scoreVal >= 3.5 && (!a.date || a.date >= queueCutoff)).length;
-  const historyCount = apps.filter(a => !['SKIP','Discarded'].includes(a.status) && a.scoreVal >= 3.5).length;
+  const historyCount = apps.filter(a => a.status !== 'SKIP' && a.scoreVal >= 3.5).length;
 
   // Enrich with URL + output folder + resume tier for visible rows
   for (const a of filtered) {
@@ -1090,7 +1093,9 @@ function renderDashboard(apps, mode, pendingCount) {
            </div>
            <div id="fill-badge-${a.num}" style="min-height:16px;text-align:center">${isLinkedIn ? '' : fillStatusBadge}${isLinkedIn ? '' : attachTick}</div>
          </div>`
-      : `<span style="color:#334155;font-size:0.8em">—</span>`;
+      // Non-Evaluated rows (History tab): ↩ revert button so an accidental
+      // Applied/Skip click can be undone — flips status back to Evaluated.
+      : `<button class="discard-btn" onclick="revertJob(this,${a.num})" title="Revert to Evaluated — undo accidental Applied/Skip">↩ Revert</button>`;
 
     // Cover letter cell — check disk + in-memory status
     const clPath = a.outputFolder ? join(a.outputFolder, 'cover-letter.html') : null;
@@ -1380,6 +1385,33 @@ function applyJob(el, num) {
   })
   .catch(() => { el.textContent = 'Error'; el.disabled = false; });
 }
+// Revert any non-Evaluated row back to Evaluated. Row disappears from History
+// (no longer matches the History filter) and reappears on Apply Queue if the
+// date is still within the rolling 3-business-day window.
+function revertJob(el, num) {
+  el.disabled = true;
+  el.textContent = '↩ ...';
+  fetch('/revert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ num })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      const row = document.getElementById('row-' + num);
+      if (row) {
+        row.style.transition = 'opacity 0.5s';
+        row.style.opacity = '0';
+        setTimeout(() => row.remove(), 500);
+      }
+    } else {
+      el.textContent = 'Error';
+      el.disabled = false;
+    }
+  })
+  .catch(() => { el.textContent = 'Error'; el.disabled = false; });
+}
 function openFolder(el, path) {
   const orig = el.textContent;
   el.textContent = '⏳';
@@ -1599,10 +1631,10 @@ function renderReport(rawPath) {
 function renderPending(items, apps) {
   // Tab badge counts MUST match the rendered table:
   // - Apply Queue: Evaluated + score ≥ 3.5 + last 3 business days (same as rendered)
-  // - History: all active statuses + score ≥ 3.5 (no date cutoff)
+  // - History: all statuses except SKIP + score ≥ 3.5 (Discarded included for revert)
   const queueCutoff = businessDayCutoff(3);
   const queueCount = apps.filter(a => a.status === 'Evaluated' && a.scoreVal >= 3.5 && (!a.date || a.date >= queueCutoff)).length;
-  const historyCount = apps.filter(a => !['SKIP','Discarded'].includes(a.status) && a.scoreVal >= 3.5).length;
+  const historyCount = apps.filter(a => a.status !== 'SKIP' && a.scoreVal >= 3.5).length;
 
   function sourceColor(s) {
     if (!s) return '#475569';
@@ -1767,6 +1799,25 @@ const server = http.createServer((req, res) => {
         writeFileSync(reportPath, updated);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    });
+    return;
+  }
+
+  // Revert any non-Evaluated status back to Evaluated — undo for accidental
+  // Applied / Skip clicks. Re-eligible for Apply Queue if still within date cutoff.
+  if (url.pathname === '/revert' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { num } = JSON.parse(body);
+        const result = updateApplicationStatus(parseInt(num), 'Evaluated');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: e.message }));
