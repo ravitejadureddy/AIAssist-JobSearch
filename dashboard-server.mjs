@@ -922,16 +922,15 @@ function renderDashboard(apps, mode, pendingCount) {
 
     const tierColor = a.resumeTier === 'tailored' ? '#22c55e' : a.resumeTier === 'archetype' ? '#f59e0b' : '#64748b';
     const tierLabel = a.resumeTier === 'tailored' ? '★' : a.resumeSource || 'generic';
-    const tierTitle = a.resumeTier === 'tailored'
-      ? 'Tailored resume generated from JD'
-      : a.resumeTier === 'archetype'
-        ? `Using Resume/${a.resumeSource}/resume.pdf (no tailored CV generated)`
-        : 'Using generic resume (no tailored or archetype CV)';
     const folderTarget = a.resumeTier === 'tailored' && a.outputFolder
       ? a.outputFolder
       : a.resumeTier !== 'generic'
         ? join(CAREER_OPS, 'Resume', a.resumeSource || 'generic')
         : join(CAREER_OPS, 'Resume', 'generic');
+    // Tooltip = actual resume path so user knows exactly which file the row uses.
+    const tierTitle = a.resumeTier === 'tailored'
+      ? join(folderTarget, 'resume.pdf').replace(CAREER_OPS + '/', '')
+      : join(folderTarget, 'resume.pdf').replace(CAREER_OPS + '/', '');
     const folderBtn = `<span class="icon-link" onclick="openFolder(this,'${esc(folderTarget)}')" title="${esc(tierTitle)}">📁</span><span style="font-size:0.7em;color:${tierColor};margin-left:2px" title="${esc(tierTitle)}">${esc(tierLabel)}</span>`;
 
     // Tick B — semantic-validation tick. Shown only on Apply Queue tab, only
@@ -989,11 +988,12 @@ function renderDashboard(apps, mode, pendingCount) {
       if (st === 'FILLED_PENDING_REVIEW') {
         return `<span class="fill-status ${st}" title="Form filled and browser is open — review and submit in the Terminal window">FILLED — REVIEW &amp; SUBMIT</span>`;
       }
+      // NEEDS_ANSWER and other statuses: just show the status badge.
+      // Unknown questions are listed in the tooltip; user re-clicks 🌐 Open to
+      // fill the form — manually-filled answers get auto-captured on Submit.
       if (st === 'NEEDS_ANSWER') {
-        const questionsJson = esc(JSON.stringify(fillSt.needsAnswer || []));
-        return `<span class="fill-status ${st}" title="Unknown questions: ${title}">${label}</span>` +
-               `<button class="fill-btn" style="margin-top:3px;font-size:0.72em;padding:3px 8px;border-color:#d97706;color:#d97706" ` +
-               `onclick="openAnswerModal(this,${a.num},'${questionsJson}')">📝 Answer &amp; Retry</button>`;
+        const questionsList = (fillSt.needsAnswer || []).join(', ');
+        return `<span class="fill-status ${st}" title="Unknown questions: ${esc(questionsList)}">${label}</span>`;
       }
       return `<span class="fill-status ${st}" title="${title}">${label}</span>`;
     })() : '';
@@ -1026,14 +1026,14 @@ function renderDashboard(apps, mode, pendingCount) {
 
     let fillOrLinkedIn;
     if (agentActive && a.jobUrl) {
-      // Fill Agent connected: one primary button that opens URL in fill-agent Chrome
-      // LinkedIn jobs → user still needs to click "Apply on website" inside the agent browser
-      const openLabel = isLinkedIn ? '🌐 Open in Browser' : '🌐 Open & Fill';
+      // Fill Agent connected: one primary "Open" button. Same behavior regardless of
+      // host — opens in the fill-agent Chrome. ATS pages fill automatically; LinkedIn
+      // requires user to click Apply on the company website (handler fires after that).
       const openTitle = isLinkedIn
         ? 'Open in Fill Agent Chrome — log in and click Apply on company website; form fills automatically'
         : 'Open in Fill Agent Chrome — form fills automatically';
       fillOrLinkedIn = `<button class="fill-btn" onclick="openFill(${a.num},'${esc(a.jobUrl)}')"
-          title="${esc(openTitle)}" style="background:#1e3a5f;border-color:#3b82f6;color:#93c5fd">${openLabel}</button>${isLinkedIn ? editUrlBtn : ''}`;
+          title="${esc(openTitle)}" style="background:#1e3a5f;border-color:#3b82f6;color:#93c5fd">🌐 Open</button>${isLinkedIn ? editUrlBtn : ''}`;
     } else if (isLinkedIn) {
       // No agent: show LinkedIn link + ✎ override
       fillOrLinkedIn = `<a href="${esc(a.jobUrl)}" target="_blank" class="linkedin-btn"
@@ -1193,7 +1193,7 @@ function openFill(num, jobUrl) {
         if (d.status === 'connected') {
           if (pageLoadedDisconnected) {
             // First connection after a disconnected page-load — reload so the
-            // row buttons re-render with the Fill Agent variant (🌐 Open & Fill).
+            // row buttons re-render with the Fill Agent variant (🌐 Open).
             location.reload();
             return;
           }
@@ -1484,13 +1484,7 @@ function pollFillStatus(num, el) {
         const badgeWrap = document.getElementById('fill-badge-' + num);
         if (badgeWrap) {
           const title = (data.needsAnswer || []).join(', ') || data.error || '';
-          if (st === 'NEEDS_ANSWER' && data.needsAnswer?.length) {
-            const qj = JSON.stringify(data.needsAnswer).replace(/'/g, "\\'");
-            badgeWrap.innerHTML = '<span class="fill-status NEEDS_ANSWER" title="' + title.replace(/"/g,'&quot;') + '">NEEDS ANSWER</span>' +
-              '<button class="fill-btn" style="margin-top:3px;font-size:0.72em;padding:3px 8px;border-color:#d97706;color:#d97706" onclick="openAnswerModal(this,' + num + ',\\'' + qj + '\\')">📝 Answer &amp; Retry</button>';
-          } else {
-            badgeWrap.innerHTML = '<span class="fill-status ' + st + '" title="' + title.replace(/"/g, '&quot;') + '">' + (st || '').replace(/_/g, ' ') + '</span>';
-          }
+          badgeWrap.innerHTML = '<span class="fill-status ' + st + '" title="' + title.replace(/"/g, '&quot;') + '">' + (st || '').replace(/_/g, ' ') + '</span>';
         }
       })
       .catch(() => setTimeout(check, 4000));
@@ -1506,72 +1500,10 @@ _es.addEventListener('shutdown', () => {
   window.close();
 });
 
-// ── Answer modal ─────────────────────────────────────────────────────────────
-let _answerModalNum = null;
-let _answerModalQuestions = [];
-function openAnswerModal(el, num, questionsJson) {
-  _answerModalNum = num;
-  try { _answerModalQuestions = JSON.parse(questionsJson); } catch { _answerModalQuestions = []; }
-  const modal = document.getElementById('answer-modal');
-  const form  = document.getElementById('answer-modal-form');
-  form.innerHTML = _answerModalQuestions.map((q, i) =>
-    '<div style="margin-bottom:14px">' +
-      '<label style="display:block;font-size:0.85em;color:#94a3b8;margin-bottom:4px">' + q.replace(/</g,'&lt;') + '</label>' +
-      '<textarea id="aq-' + i + '" rows="2" style="width:100%;box-sizing:border-box;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#f1f5f9;padding:6px 8px;font-size:0.85em;resize:vertical" placeholder="Your answer…"></textarea>' +
-    '</div>'
-  ).join('');
-  modal.style.display = 'flex';
-  if (_answerModalQuestions.length > 0) document.getElementById('aq-0')?.focus();
-}
-function closeAnswerModal() {
-  document.getElementById('answer-modal').style.display = 'none';
-}
-function saveAnswers() {
-  const pairs = _answerModalQuestions.map((q, i) => ({
-    label: q,
-    answer: (document.getElementById('aq-' + i)?.value || '').trim()
-  })).filter(p => p.answer);
-  if (pairs.length === 0) { closeAnswerModal(); return; }
-  const saveBtn = document.getElementById('answer-save-btn');
-  saveBtn.textContent = '⏳ Saving…';
-  saveBtn.disabled = true;
-  fetch('/save-answers', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ num: _answerModalNum, pairs })
-  })
-  .then(r => r.json())
-  .then(data => {
-    closeAnswerModal();
-    if (data.ok) {
-      const fillBadge = document.getElementById('fill-badge-' + _answerModalNum);
-      if (fillBadge) fillBadge.innerHTML = '<span style="font-size:0.75em;color:#94a3b8">Retrying fill…</span>';
-      fetch('/fill-application', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ num: _answerModalNum })
-      }).then(() => pollFillStatus(_answerModalNum, null));
-    }
-  })
-  .catch(() => { saveBtn.textContent = 'Save & Retry'; saveBtn.disabled = false; });
-}
+// Answer modal removed — manually-filled form fields are auto-captured on Submit
+// via _coCapture (fill-agent) / _captureFormAnswers (smart-apply). The user just
+// re-clicks 🌐 Open, fills the remaining questions in the form, and submits.
 </script>
-
-<!-- Answer Modal -->
-<div id="answer-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center">
-  <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;padding:24px;width:520px;max-width:95vw;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <h3 style="margin:0;font-size:1em;color:#f1f5f9">Answer unknown questions</h3>
-      <button onclick="closeAnswerModal()" style="background:none;border:none;color:#64748b;font-size:1.2em;cursor:pointer;padding:0 4px">✕</button>
-    </div>
-    <p style="font-size:0.8em;color:#64748b;margin:0 0 16px">Answers are saved to <code>application_answers.json</code> and reused for all future applications.</p>
-    <div id="answer-modal-form"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
-      <button onclick="closeAnswerModal()" style="background:none;border:1px solid #334155;color:#94a3b8;padding:7px 14px;border-radius:6px;cursor:pointer;font-size:0.85em">Cancel</button>
-      <button id="answer-save-btn" onclick="saveAnswers()" style="background:#1d4ed8;border:none;color:#fff;padding:7px 16px;border-radius:6px;cursor:pointer;font-size:0.85em;font-weight:600">Save &amp; Retry Fill</button>
-    </div>
-  </div>
-</div>
 </body>
 </html>`;
 }
@@ -1902,55 +1834,6 @@ const server = http.createServer((req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'idle' }));
-    return;
-  }
-
-  if (url.pathname === '/save-answers' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const { num, pairs } = JSON.parse(body); // pairs: [{label, answer}]
-        if (!Array.isArray(pairs) || pairs.length === 0) {
-          res.writeHead(400); res.end(JSON.stringify({ ok: false, error: 'no pairs' })); return;
-        }
-
-        // Build company token list to block company-specific questions from being saved
-        const applyStatus = num ? readApplyStatus(num) : null;
-        const companyTokens = (applyStatus?.company || '')
-          .toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(t => t.length > 2);
-
-        const answersFile = join(CAREER_OPS, 'data', 'application_answers.json');
-        const data = JSON.parse(readFileSync(answersFile, 'utf-8'));
-
-        for (const { label, answer } of pairs) {
-          if (!label || !answer) continue;
-          const lbl = label.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim();
-          // Skip company-specific questions
-          if (companyTokens.length > 0 && companyTokens.some(t => lbl.includes(t))) continue;
-          const id  = lbl.replace(/\s+/g, '_').slice(0, 40);
-          // Skip if a pattern already covers this label
-          const alreadyExists = data.answers.some(a =>
-            a.patterns?.some(p => lbl.includes(p.toLowerCase()))
-          );
-          if (alreadyExists) continue;
-          data.answers.push({
-            id,
-            patterns: [lbl],
-            answer,
-            answer_short: answer.length > 80 ? answer.slice(0, 77) + '…' : answer,
-            type: answer.split(' ').length > 10 ? 'textarea' : 'text',
-            _source: 'dashboard-interactive',
-          });
-        }
-
-        writeFileSync(answersFile, JSON.stringify(data, null, 2));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, saved: pairs.length }));
-      } catch (e) {
-        res.writeHead(500); res.end(JSON.stringify({ ok: false, error: e.message }));
-      }
-    });
     return;
   }
 
