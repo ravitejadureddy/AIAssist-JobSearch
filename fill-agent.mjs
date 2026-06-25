@@ -440,6 +440,8 @@ const SKIP_HOSTS = ['linkedin.com', 'google.com', 'github.com', 'stackoverflow.c
 
 // Generic-handler eligibility: URL or hostname strongly suggests an application
 // page. Without this the generic handler would fire on any random web page.
+// Also widens the net for company-owned career pages that use `/roles/` or
+// `/positions/` instead of the older `/job/` or `/apply/` patterns.
 function isLikelyApplyUrl(url) {
   if (!url?.startsWith('http')) return false;
   try {
@@ -448,9 +450,9 @@ function isLikelyApplyUrl(url) {
     const host = u.hostname.toLowerCase();
     // Path looks like an apply step (matches careers.*/apply, *.com/job/.../apply, etc.)
     if (/\/(apply|application|applicant)(\/|$|\?)/.test(path)) return true;
-    if (/\/careers?\/.*(apply|application|job|position|opening)/.test(path)) return true;
+    if (/\/careers?\/.*(apply|application|job|jobs|position|positions|opening|role|roles)/.test(path)) return true;
     // Host is a careers subdomain AND path mentions the role
-    if (/^(careers?|jobs?|recruit|hiring|talent|apply)\./.test(host) && /\/(job|position|career|apply)/.test(path)) return true;
+    if (/^(careers?|jobs?|recruit|hiring|talent|apply)\./.test(host) && /\/(job|jobs|position|positions|career|careers|apply|role|roles|opening)/.test(path)) return true;
     // Embedded apply widget on the main marketing site
     if (/careers?|jobs?/.test(path) && /(apply|application)/.test(path)) return true;
   } catch {}

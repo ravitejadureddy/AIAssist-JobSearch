@@ -158,8 +158,13 @@ function extractUrlFromReport(reportPath) {
 }
 
 // ─── ATS detection ────────────────────────────────────────────────────────────
+// Detects the ATS based on the URL. Recognizes both first-party hosts
+// (boards.greenhouse.io) and "wrapped" cases where the company hosts the
+// ATS form on their own domain — typically signalled by a query param like
+// gh_jid (Greenhouse), lever_source (Lever), or ashby_jid (Ashby).
 function detectATS(url) {
   if (!url) return 'unknown';
+  // ── First-party ATS hosts ────────────────────────────────────────────────
   if (/greenhouse\.io/i.test(url))                                  return 'greenhouse';
   if (/lever\.co/i.test(url))                                       return 'lever';
   if (/ashbyhq\.com/i.test(url) || /ashby\.com/i.test(url))        return 'ashby';
@@ -173,6 +178,14 @@ function detectATS(url) {
   if (/rippling\.com/i.test(url))                                   return 'rippling';
   if (/dover\.com/i.test(url))                                      return 'dover';
   if (/successfactors\.com|successfactors\.eu/i.test(url))         return 'successfactors';
+  // ── Wrapped cases: ATS embedded on a company's own domain ────────────────
+  // gh_jid is Greenhouse's canonical job ID parameter; companies like Samsara,
+  // Notion, and many YC startups embed Greenhouse via `?gh_jid=...`.
+  if (/[?&]gh_jid=\d+/i.test(url))                                  return 'greenhouse';
+  // lever_source / lever-source on company-owned career page
+  if (/[?&]lever[_-]?source=/i.test(url))                           return 'lever';
+  // Ashby's typical wrapped param
+  if (/[?&]ashby_jid=/i.test(url) || /[?&]ashbyhq=/i.test(url))    return 'ashby';
   return 'unknown';
 }
 
