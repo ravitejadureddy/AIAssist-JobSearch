@@ -1079,7 +1079,7 @@ function renderDashboard(apps, mode, pendingCount) {
     const actionCell = a.status === 'Evaluated'
       ? `<div style="display:flex;flex-direction:column;align-items:center;gap:4px">
            <div style="display:flex;gap:4px;align-items:center;justify-content:center;flex-wrap:wrap">
-             <button class="apply-btn" onclick="applyJob(this,${a.num})" title="Mark as Applied in tracker">Apply</button>
+             <button class="apply-btn" onclick="applyJob(this,${a.num})" title="Mark as Applied in tracker after submitting the form">Applied</button>
              <button class="discard-btn" onclick="discardJob(this,${a.num})" title="Skip — remove from queue">Skip</button>
              ${fillOrLinkedIn}
            </div>
