@@ -499,6 +499,7 @@ class FillAgent {
     console.log(`[fill-agent] manual Fill Now → ${ats} on ${url}`);
     try {
       const result = await fillPage(page, url, ats);
+      page._coLastFilledUrl = url; // tell the poller this URL is taken care of
       console.log(`[fill-agent] manual fill → ${result.outcome}`);
       return { ok: true, outcome: result.outcome };
     } catch (e) {
@@ -537,7 +538,68 @@ class FillAgent {
     }
   }
 
+  // Phase 2: URL-poller for SPA pages. Workday / SuccessFactors / many React
+  // ATSes do step transitions via history.pushState() which doesn't always
+  // fire framenavigated. We poll page.url() as a safety net — if the URL
+  // changed but framenavigated didn't act (or fired but missed the new step),
+  // we fire fillPage ourselves.
+  //
+  // Coordination with framenavigated:
+  //   - Every successful fill sets page._coLastFilledUrl = url
+  //   - Poller only fires for URLs that are NOT page._coLastFilledUrl
+  //   - Poller waits for URL stability (~5s unchanged) before firing
+  // → No double-fires; poller is a true backstop, not a competitor.
+  _startUrlPoller(page) {
+    if (page._coUrlPoller) return;
+    let lastUrl;
+    try { lastUrl = page.url(); } catch { return; }
+    let urlChangedAt = Date.now();
+    let fillInFlight = false; // setInterval doesn't serialize async handlers;
+                              // this flag prevents the poller from firing
+                              // fillPage while a previous fill is still running.
+
+    const interval = setInterval(async () => {
+      if (this._paused) return;
+      if (fillInFlight) return;
+      let currentUrl;
+      try { currentUrl = page.url(); }
+      catch { clearInterval(interval); page._coUrlPoller = null; return; }
+
+      if (currentUrl !== lastUrl) {
+        lastUrl = currentUrl;
+        urlChangedAt = Date.now();
+        return;
+      }
+      // URL stable. If framenavigated already filled this URL, nothing to do.
+      if (page._coLastFilledUrl === currentUrl) return;
+      // Wait for stability (~5s) so framenavigated has a chance to fire first.
+      if (Date.now() - urlChangedAt < 5000) return;
+      if (!shouldWatch(currentUrl)) return;
+
+      this._lastWatchedPage = page;
+      const ats = detectATS(currentUrl);
+      console.log(`[fill-agent] (poll) SPA transition detected → ${ats} on ${currentUrl}`);
+      fillInFlight = true;
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+        if (this._paused) { fillInFlight = false; return; }
+        const result = await fillPage(page, currentUrl, ats);
+        page._coLastFilledUrl = currentUrl;
+        this._emit({ type: 'filled', url: currentUrl, ats, result });
+        console.log(`[fill-agent] (poll) ${ats} → ${result.outcome}`);
+      } catch (err) {
+        console.warn(`[fill-agent] (poll) error: ${err.message}`);
+      } finally {
+        fillInFlight = false;
+      }
+    }, 2000);
+    page._coUrlPoller = interval;
+    page.on('close', () => { clearInterval(interval); page._coUrlPoller = null; });
+  }
+
   _watchPage(page) {
+    // Start the URL poller as soon as we begin watching this page.
+    this._startUrlPoller(page);
     page.on('framenavigated', async frame => {
       if (frame !== page.mainFrame()) return;
       const url = frame.url();
@@ -565,6 +627,7 @@ class FillAgent {
       try {
         await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
         const result = await fillPage(page, url, ats);
+        page._coLastFilledUrl = url; // so the URL poller skips re-firing on the same URL
         this._emit({ type: 'filled', url, ats, result });
         console.log(`[fill-agent] ${ats} → ${result.outcome}`);
       } catch (err) {
