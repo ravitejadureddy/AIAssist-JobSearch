@@ -55,6 +55,8 @@ let lastPing = Date.now();
 const PING_INTERVAL_MS = 3000;
 const PING_TIMEOUT_MS = 10000; // 10s — shut down shortly after browser tab closes
 const GRACE_PERIOD_MS = 20000; // wait before starting the watchdog
+const NO_CLIENTS_SHUTDOWN_MS = 3000; // SSE last-tab-closed → 3s to allow Cmd+R refresh
+let _noClientsTimer = null;
 
 function broadcastSSE(obj) {
   const data = `data: ${JSON.stringify(obj)}\n\n`;
@@ -2165,7 +2167,22 @@ const server = http.createServer((req, res) => {
     });
     res.write('retry: 3000\n\n');
     sseClients.add(res);
-    req.on('close', () => sseClients.delete(res));
+    // If a no-clients shutdown timer was running (we were about to quit), the
+    // new client cancels it — they're back, likely a refresh.
+    if (_noClientsTimer) { clearTimeout(_noClientsTimer); _noClientsTimer = null; }
+    req.on('close', () => {
+      sseClients.delete(res);
+      // If this was the last dashboard tab, start a short countdown.
+      // A refresh will reconnect within ~1s and cancel via the block above.
+      // A genuine close → countdown expires → fullShutdown.
+      if (sseClients.size === 0 && !_shuttingDown) {
+        if (_noClientsTimer) clearTimeout(_noClientsTimer);
+        _noClientsTimer = setTimeout(() => {
+          _noClientsTimer = null;
+          if (sseClients.size === 0) fullShutdown('last dashboard tab closed');
+        }, NO_CLIENTS_SHUTDOWN_MS);
+      }
+    });
     return;
   }
 
@@ -2179,8 +2196,42 @@ function broadcastShutdown() {
   }
 }
 
-process.on('SIGINT',  () => { broadcastShutdown(); setTimeout(() => process.exit(0), 400); });
-process.on('SIGTERM', () => { broadcastShutdown(); setTimeout(() => process.exit(0), 400); });
+// Kill the fill-agent Chrome (port 9222). All tabs in that Chrome go with it —
+// user has explicitly accepted this trade-off. Best-effort; ignore if not running.
+function killFillAgentChrome() {
+  try {
+    spawn('pkill', ['-f', 'remote-debugging-port=9222'], { stdio: 'ignore', detached: true }).unref();
+  } catch { /* ignored */ }
+}
+
+// Kill in-flight PDF + validation backfills so closing the dashboard immediately
+// stops all background work (matches user mental model). In-flight detached
+// per-PDF validator children continue to completion (1-3 max at any moment).
+function killBackgroundJobs() {
+  try {
+    if (pdfBackfillProc) { pdfBackfillProc.kill('SIGTERM'); pdfBackfillProc = null; }
+  } catch { /* ignored */ }
+  try {
+    if (validationBackfillProc) { validationBackfillProc.kill('SIGTERM'); validationBackfillProc = null; }
+  } catch { /* ignored */ }
+}
+
+// One-shot full shutdown: tell connected tabs we're going, kill backfills + Chrome,
+// then exit. Guarded so multiple triggers (SSE-disconnect + SIGTERM + endpoint)
+// don't race to call process.exit twice.
+let _shuttingDown = false;
+function fullShutdown(reason) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  console.log(`[shutdown] ${reason} — stopping background jobs + killing Chrome`);
+  broadcastShutdown();
+  killBackgroundJobs();
+  killFillAgentChrome();
+  setTimeout(() => process.exit(0), 400);
+}
+
+process.on('SIGINT',  () => fullShutdown('SIGINT'));
+process.on('SIGTERM', () => fullShutdown('SIGTERM'));
 
 server.listen(PORT, HOST, () => {
   const url = `http://${HOST}:${PORT}`;
@@ -2201,26 +2252,17 @@ server.listen(PORT, HOST, () => {
   // generate-missing-pdfs.mjs (fireValidationIfEligible).
   setTimeout(() => startValidationBackfill(), 20000);
 
-  // Watchdog: shut down when the browser tab is closed (heartbeat stops).
-  // Exception: if the PDF backfill is currently running, keep the server
-  // alive so it can finish — the user can close the tab and walk away.
-  // Normal shutdown resumes once backfill is done and pings still missing.
-  let backfillKeepAliveLogged = false;
+  // Heartbeat watchdog — fallback only. The SSE-disconnect path (above) handles
+  // the common case in ~3s. This watchdog catches the case where SSE never
+  // disconnects cleanly (e.g. system crash, Chrome killed externally).
+  // No backfill-keep-alive exception — closing the tab stops all background
+  // work (user mental model). Headless backfill is still available via:
+  //   node generate-missing-pdfs.mjs --queue-only
+  //   node backfill-validation.mjs
   setTimeout(() => {
     setInterval(() => {
-      if (Date.now() - lastPing <= PING_TIMEOUT_MS) {
-        backfillKeepAliveLogged = false; // user is back, reset the log latch
-        return;
-      }
-      if (pdfBackfillStats.running) {
-        if (!backfillKeepAliveLogged) {
-          console.log(`[heartbeat] browser gone but backfill running (${pdfBackfillStats.done}/${pdfBackfillStats.total}) — keeping server alive`);
-          backfillKeepAliveLogged = true;
-        }
-        return;
-      }
-      console.log('Browser disconnected — shutting down.');
-      process.exit(0);
+      if (Date.now() - lastPing <= PING_TIMEOUT_MS) return;
+      fullShutdown('heartbeat watchdog (no SSE disconnect observed)');
     }, PING_INTERVAL_MS);
   }, GRACE_PERIOD_MS);
 });
