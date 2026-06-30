@@ -1,34 +1,23 @@
 # Security Policy
 
-## Reporting a Vulnerability
+This is a **personal portfolio fork** of [santifer/career-ops](https://github.com/santifer/career-ops). There is no hosted service, no production deployment, and no shared infrastructure — the system runs entirely on a user's local machine.
 
-**Do NOT open a public issue for security vulnerabilities.**
+## Reporting a vulnerability
 
-Instead, please email **hi@santifer.io** with:
+**Do not open a public issue for security vulnerabilities.**
 
-1. Description of the vulnerability
-2. Steps to reproduce
-3. Potential impact
-4. Suggested fix (if any)
-
-You will receive a response within 72 hours. We will work with you to understand and address the issue before any public disclosure.
+- **For issues specific to this fork** (e.g., a bug introduced by my changes): email `raviteja.dureddy@gmail.com`. I'll respond within 72 hours.
+- **For issues in the upstream project** (anything inherited from santifer/career-ops): please follow the upstream [Security Policy](https://github.com/santifer/career-ops/blob/main/SECURITY.md) so the fix lands in the actively-maintained codebase and propagates to all forks.
 
 ## Scope
 
-Security issues in the following are in scope:
+In scope for this fork:
+- Scripts (`*.mjs`) — command injection, path traversal, SSRF
+- Templates — XSS in generated HTML/PDF
+- Configuration — secrets exposure, unsafe defaults
 
-- **Scripts** (`*.mjs`) — command injection, path traversal, SSRF
-- **Dashboard** (`dashboard/`) — any Go binary vulnerabilities
-- **Templates** (`templates/`) — XSS in generated HTML/PDF
-- **Configuration** — secrets exposure, unsafe defaults
-
-## Out of Scope
-
-- Issues in third-party dependencies (report upstream)
+Out of scope:
+- Issues in third-party dependencies (report to the dependency upstream)
 - Issues requiring physical access to the user's machine
-- Social engineering attacks
-- career-ops is a local tool — there is no hosted service to attack
-
-## Disclosure Policy
-
-We follow coordinated disclosure. Once a fix is released, we will credit the reporter (unless they prefer anonymity) in the release notes.
+- Social engineering
+- Anything specific to the user's local data files (they are gitignored — not part of the codebase)

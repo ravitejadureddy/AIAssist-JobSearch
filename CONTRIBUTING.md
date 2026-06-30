@@ -1,88 +1,21 @@
-# Contributing to Career-Ops
+# Contributing
 
-Thanks for your interest in contributing! Career-Ops is built with Claude Code, and you can use it for development too.
+This is a **personal portfolio fork** of [santifer/career-ops](https://github.com/santifer/career-ops). It mirrors my actual daily-use codebase and is not actively soliciting external contributions.
 
-## Before Submitting a PR
+## Where to send contributions
 
-**Please open an issue first to discuss the change you'd like to make.** This helps us align on direction before you invest time coding.
+**Most contributions belong upstream:**
+[santifer/career-ops](https://github.com/santifer/career-ops) is the actively-maintained project with a real contributor community, CI/CD, and a public roadmap. New features, bug fixes, language support, and provider modules should be proposed there — all forks benefit when the upstream improves.
 
-PRs without a corresponding issue may be closed if they don't align with the project's architecture or goals.
+**For this fork specifically:**
+- Bug reports and questions are welcome via [Issues](https://github.com/ravitejadureddy/AIAssist-JobSearch/issues) — no SLA on responses
+- PRs are reviewed when time permits, but the fork's direction follows my personal job-search needs
+- If you find something that's broken because of a fork-specific change I made, that's worth flagging here
 
-### What makes a good PR
-- Fixes a bug listed in Issues
-- Addresses a feature request that was discussed and approved
-- Includes a clear description of what changed and why
-- Follows the existing code style and project philosophy (simple, minimal, quality over quantity)
+## License and brand
 
-## Quick Start
+The codebase is MIT-licensed (see [LICENSE](LICENSE)) — fork freely and make it yours. The "career-ops" name and brand are governed by upstream's [TRADEMARK.md](TRADEMARK.md) — please name your fork distinctly.
 
-1. Open an issue to discuss your idea
-2. Fork the repo
-3. Create a branch (`git checkout -b feature/my-feature`)
-4. Make your changes
-5. Test with a fresh clone (see [docs/SETUP.md](docs/SETUP.md))
-6. Commit and push
-7. Open a Pull Request referencing the issue
+## Contact
 
-## What to Contribute
-
-**Good first contributions:**
-- Add companies to `templates/portals.example.yml`
-- Translate modes to other languages
-- Improve documentation
-- Add example CVs for different roles (in `examples/`)
-- Report bugs via [Issues](https://github.com/santifer/career-ops/issues)
-
-**Bigger contributions:**
-- New evaluation dimensions or scoring logic
-- Dashboard TUI features (in `dashboard/`)
-- New skill modes (in `modes/`)
-- Script improvements (`.mjs` utilities)
-
-## Scope: the core vs. the shared layer
-
-career-ops core is **local-first and human-in-the-loop** by design — it runs on your machine and drafts applications for *you* to review and submit. Centralized infrastructure — hosted job aggregation, a shared matching service, proxies or Workers the project would operate — is **not part of the core**: it's heavier than a free local tool should carry, and it's where the project is headed as a *separate, opt-in service*. See the direction here: **[Where career-ops is going](https://github.com/santifer/career-ops/discussions/904)**.
-
-Rule of thumb before you build: **provider modules, languages, CLI support, modes, dashboard, docs and fixes → the core.** Bigger centralized or automation ideas (a hosted layer, auto-apply, scraping infrastructure) → **start in that discussion**, so we can route them together instead of a large PR that can't merge.
-
-## Guidelines
-
-- Keep modes language-agnostic when possible (Claude handles both EN and ES)
-- Scripts should handle missing files gracefully (check `existsSync` before `readFileSync`)
-- Dashboard changes require `go build` — test with real data before submitting
-- Don't commit personal data (cv.md, profile.yml, applications.md, reports/)
-
-## What we do NOT accept
-
-- **PRs that scrape platforms prohibiting automated access** (LinkedIn, etc.). We actively reject these to respect third-party ToS.
-- **PRs that enable auto-submitting applications** without human review. career-ops is a decision-support tool, not a spam bot.
-- **PRs that add external API dependencies** without prior discussion in an issue.
-- **PRs that add centralized or hosted infrastructure to the core** (proxies, aggregation services, shared Workers). That's the separate opt-in service, not the open-core — bring it to the [direction discussion](https://github.com/santifer/career-ops/discussions/904) first.
-- **PRs containing personal data** (real CVs, emails, phone numbers). Use `examples/` with fictional data instead.
-
-## Development
-
-```bash
-# Scripts
-npm run doctor                # Setup validation
-node verify-pipeline.mjs     # Health check
-node cv-sync-check.mjs        # Config check
-
-# Dashboard
-cd dashboard && go build -o career-dashboard .
-./career-dashboard --path ..
-```
-
-## Brand and Trademark
-
-Contributions to the codebase are governed by the MIT [LICENSE](LICENSE).
-The "career-ops" name itself is governed by [TRADEMARK.md](TRADEMARK.md).
-If you fork the project for commercial use, you're welcome to do so
-under MIT — please give it your own product name and follow the
-trademark policy regarding commercial naming and endorsement claims.
-
-## Need Help?
-
-- [Join the Discord](https://discord.gg/8pRpHETxa4) — fastest way to get answers and connect with other contributors
-- [Open an issue](https://github.com/santifer/career-ops/issues)
-- [Read the architecture docs](docs/ARCHITECTURE.md)
+`raviteja.dureddy@gmail.com` for fork-specific matters.
