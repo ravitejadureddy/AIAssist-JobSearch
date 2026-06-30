@@ -86,3 +86,4 @@ batch-pdf-gen-dexian.mjs
 generate-custom-pdf.mjs
 extract_resume.py
 data/h1b-cache.tsv.bak/
+interview-prep/
