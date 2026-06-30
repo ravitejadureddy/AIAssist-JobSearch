@@ -15,6 +15,18 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CAREER_OPS = __dirname;
 const APPLICATIONS_MD = join(CAREER_OPS, 'data/applications.md');
+const PROFILE_YML = join(CAREER_OPS, 'config', 'profile.yml');
+
+// Read visa_status from config/profile.yml to decide whether H-1B-label gating
+// applies. Adopters who don't need sponsorship (US Citizens, Green Card holders,
+// etc.) shouldn't have eligibility blocked by missing H-1B labels — for them,
+// eligibility is purely score+queue based. Safe-default = "needs sponsorship".
+function userNeedsSponsorship() {
+  if (!existsSync(PROFILE_YML)) return true;
+  const m = readFileSync(PROFILE_YML, 'utf-8').match(/visa_status\s*:\s*['"]?([^'"\n]+)['"]?/);
+  if (!m) return true;
+  return !/no sponsorship needed|us citizen|green card|permanent resident/.test(m[1].toLowerCase());
+}
 
 // Mirror of dashboard-server.mjs:66 — earliest date that still counts as Apply Queue.
 export function businessDayCutoff(n = 3) {
@@ -141,10 +153,12 @@ export function isQueueEligible(reportNum) {
   const queue = loadQueueMap();
   const row = queue.get(String(reportNum));
   if (!row) return { eligible: false, reason: 'not_in_apply_queue', row: null };
-  if (!['High', 'Medium', 'Low'].includes(row.h1bLabel)) {
+  // H-1B label gate only applies if the user needs sponsorship. Adopters who don't
+  // (US Citizens, Green Card holders, etc.) get score+queue-based eligibility instead.
+  if (userNeedsSponsorship() && !['High', 'Medium', 'Low'].includes(row.h1bLabel)) {
     return { eligible: false, reason: `h1b_label_${row.h1bLabel || 'unknown'}`, row };
   }
-  return { eligible: true, reason: 'in_queue_h1b_sponsor', row };
+  return { eligible: true, reason: userNeedsSponsorship() ? 'in_queue_h1b_sponsor' : 'in_queue_no_sponsorship_needed', row };
 }
 
 // CLI mode for spot-checking: node queue-eligibility.mjs [num]
@@ -155,10 +169,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(JSON.stringify(result, null, 2));
   } else {
     const queue = loadQueueMap();
-    const eligible = [...queue.values()].filter(r => ['High','Medium','Low'].includes(r.h1bLabel));
+    const needsSponsor = userNeedsSponsorship();
+    const eligible = needsSponsor
+      ? [...queue.values()].filter(r => ['High','Medium','Low'].includes(r.h1bLabel))
+      : [...queue.values()];
     console.log(`Apply Queue total: ${queue.size}`);
-    console.log(`Eligible for validation (H1B High/Med/Low): ${eligible.length}`);
-    const byLabel = eligible.reduce((acc, r) => { acc[r.h1bLabel] = (acc[r.h1bLabel] || 0) + 1; return acc; }, {});
-    console.log('Breakdown:', byLabel);
+    console.log(`Visa policy: ${needsSponsor ? 'needs sponsorship — H-1B label gate applies' : 'no sponsorship needed — H-1B label gate skipped'}`);
+    console.log(`Eligible for validation: ${eligible.length}`);
+    if (needsSponsor) {
+      const byLabel = eligible.reduce((acc, r) => { acc[r.h1bLabel] = (acc[r.h1bLabel] || 0) + 1; return acc; }, {});
+      console.log('H-1B label breakdown:', byLabel);
+    }
   }
 }
