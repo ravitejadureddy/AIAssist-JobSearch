@@ -100,3 +100,47 @@ If you have a live demo/dashboard (check profile.yml), offer access in applicati
 **In evaluations (scoring):**
 - Remote dimension for hybrid outside your country: score **3.0** (not 1.0)
 - Only score 1.0 if JD says "must be on-site 4-5 days/week, no exceptions"
+
+## Your CV Format Standards
+
+<!--
+Adapt to YOUR situation. The generate-missing-pdfs.mjs tailored-CV worker
+reads this section at runtime to validate every generated CV. If you leave
+the placeholders unfilled, generated CVs will have no enforced bullet-count
+or skills-order constraints — they'll still render, just without the
+guardrails described below.
+-->
+
+These rules apply to EVERY tailored CV for this candidate. Validate before saving HTML.
+
+### Skills Section Order
+Always this exact order:
+1. **<Category 1>** — <key items, comma-separated> — ALWAYS FIRST (no JD-based reorder)
+2. **<Category 2>** — <key items>
+3. **<Category 3>** — <key items>
+4. **<Category 4>** — <key items>
+<!-- Add 5–8 categories total. Within each category, items may be reordered by JD relevance. Categories themselves never reorder. -->
+
+**Exception (optional):** Define any vertical-specific override here. Example: "For healthcare JDs that mention HL7/FHIR/EDI, 'Healthcare Data' may appear first."
+
+### Per-Employer Minimum Bullet Counts
+| Company | Min | Max | Notes |
+|---------|-----|-----|-------|
+| <Primary / current employer> | 6 | 7 | Never trim — this is your primary role |
+| <Second employer> | 4 | 5 |  |
+| <Third employer> | 2 | 2 | Always exactly 2 bullets |
+<!-- One row per employer that appears in your cv.md. The worker validates bullet counts against these ranges. -->
+
+Never reduce bullets below minimums to save space. If the CV is too long, tighten bullet prose, not bullet count.
+
+### Education Date Format
+Always full ranges: "Aug 2018 – Dec 2019". Use en-dash (–), never hyphen. Never year-only.
+
+### Post-Generation Validation Checklist
+Before saving generated CV HTML:
+- [ ] Skills: first category matches the one defined above
+- [ ] Each employer's bullet count is within its declared range
+- [ ] Education entries show "Month Year – Month Year" (not bare year)
+- [ ] No skills or metrics invented beyond cv.md
+
+Fix any failures before writing the file.
