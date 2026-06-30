@@ -80,4 +80,9 @@ reports/*.pdf
 # IDE
 .idea/
 *.swp
-*.swo
+*.swo# Stale orphaned scripts — kept locally but not in public repo
+batch-pdf-gen.mjs
+batch-pdf-gen-dexian.mjs
+generate-custom-pdf.mjs
+extract_resume.py
+data/h1b-cache.tsv.bak/
