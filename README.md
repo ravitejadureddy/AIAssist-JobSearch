@@ -3,6 +3,8 @@
 > **An extensively enhanced fork of [santifer/career-ops](https://github.com/santifer/career-ops).**
 > The upstream provides the core CLI/skill framework. This fork adds the dashboard, validation framework, fill-agent reliability layer, and production lifecycle management for a polished daily-use experience.
 
+![Live SSE dashboard — Apply Queue with H-1B-aware filtering, score curation, semantic CV validation running live (5/21 done · Pass 2/2)](docs/dashboard.png)
+
 ## Why I built this
 
 Evaluating job openings at scale is a high-context decision problem. Each posting needs to be weighed against your CV, your work-authorization situation, your compensation range, and your career trajectory — and doing that manually for hundreds of roles burns hours that should go into interview prep.
@@ -61,6 +63,23 @@ The core skill framework comes from santifer. The following are my additions:
 - Opus 4.7 for tailored CV generation + cover letters (high-stakes content)
 - Haiku 4.5 for evaluation + validation (high-volume judgment)
 - Explicit `--model` flags eliminate silent CLI default drift
+
+### System data flow
+
+```mermaid
+flowchart LR
+  Scan["Portal Scanners<br/>(Greenhouse / Ashby / Lever / Workable)"] --> Pipeline[("pipeline.md<br/>inbox")]
+  Fantastic["Fantastic Jobs API<br/>(optional)"] --> Pipeline
+  Pipeline --> Batch["auto-batch.mjs<br/>visa-gated pre-filter"]
+  Batch --> LLM["Claude Haiku 4.5<br/>evaluator (Blocks A–G)"]
+  LLM --> Reports[("reports/*.md<br/>structured eval + scoring")]
+  Reports --> Tracker[("applications.md<br/>tracker")]
+  Tracker --> Dashboard["SSE Dashboard :3000<br/>(Apply Queue, badges, ticks)"]
+  Dashboard --> Validator["Claude Haiku 4.5<br/>5-axis CV validator"]
+  Dashboard --> FillAgent["Fill Agent Chrome<br/>(Playwright + CDP)"]
+  Validator --> Output[("output/*.pdf<br/>validated tailored CVs")]
+  FillAgent --> ATS["ATS Application Forms<br/>(Greenhouse / Lever / Ashby /<br/>Workday / SuccessFactors / ...)"]
+```
 
 ## Tech stack
 
