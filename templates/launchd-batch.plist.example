@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd-batch.plist.example — Daily batch processing for career-ops
+  ────────────────────────────────────────────────────────────────────
+  Runs auto-batch.mjs twice daily (4:35am + 8:20pm). auto-batch.mjs
+  continues whatever JD evaluations are pending in batch/batch-input.tsv
+  from the previous scan, parses results, and merges into the tracker.
+
+  Setup (one-time):
+    1. Copy this file to ~/Library/LaunchAgents/com.careerops.batch.plist
+    2. Replace __PROJECT_DIR__ everywhere with the ABSOLUTE path to your
+       career-ops checkout (e.g. /Users/you/code/career-ops). No tildes.
+    3. Replace __YOUR_FANTASTIC_JOBS_API_KEY__ with your Fantastic Jobs
+       API key (get one at https://fantastic.jobs/). If you don't use
+       Fantastic Jobs, delete the entire <key>FANTASTIC_JOBS_API_KEY</key>
+       + following <string>...</string> lines — auto-batch.mjs degrades
+       gracefully without it.
+    4. Load it: launchctl load ~/Library/LaunchAgents/com.careerops.batch.plist
+    5. Verify:  launchctl list | grep careerops
+
+  Operations:
+    Stop:   launchctl unload ~/Library/LaunchAgents/com.careerops.batch.plist
+    Logs:   /tmp/careerops-batch.log and /tmp/careerops-batch-error.log
+    Times:  /usr/bin/caffeinate -s keeps the Mac awake during the run.
+            launchd auto-fires the next morning if Mac was asleep at 4:35am.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.careerops.batch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/usr/local/bin/node</string>
+        <string>__PROJECT_DIR__/auto-batch.mjs</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>FANTASTIC_JOBS_API_KEY</key>
+        <string>__YOUR_FANTASTIC_JOBS_API_KEY__</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Fires at 4:35am AND 8:20pm. Adjust to your schedule / Claude Code session-reset times. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>4</integer>
+            <key>Minute</key><integer>35</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>20</integer>
+            <key>Minute</key><integer>20</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/careerops-batch.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/careerops-batch-error.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

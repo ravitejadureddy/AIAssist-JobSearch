@@ -58,8 +58,28 @@ The core skill framework comes from santifer. The following are my additions:
 ├── start.sh                   # Lifecycle orchestrator (3s clean shutdown)
 └── launch-chrome.sh           # Dedicated Chrome with fill-agent profile
 
+## Setup automation (optional)
+
+The system works fine as a manual tool, but you can run portal scans and batch evaluations on a daily schedule.
+
+**macOS (launchd)** — two ready-to-use plist templates in `templates/`:
+
+1. Copy `templates/launchd-batch.plist.example` → `~/Library/LaunchAgents/com.careerops.batch.plist`
+2. Copy `templates/launchd-scan.plist.example`  → `~/Library/LaunchAgents/com.careerops.scan.plist`
+3. In both files, replace `__PROJECT_DIR__` with your absolute checkout path and `__YOUR_FANTASTIC_JOBS_API_KEY__` with your API key (or remove that block if unused).
+4. `launchctl load ~/Library/LaunchAgents/com.careerops.batch.plist`
+5. `launchctl load ~/Library/LaunchAgents/com.careerops.scan.plist`
+
+**Linux (cron)** — equivalent:
+```
+35 4,20 * * * cd /path/to/career-ops && FANTASTIC_JOBS_API_KEY=... /usr/bin/node auto-batch.mjs
+ 0 18    * * * cd /path/to/career-ops && FANTASTIC_JOBS_API_KEY=... /usr/bin/node scan.mjs && /usr/bin/node auto-batch.mjs
+```
+
+API keys and other secrets go in `.env` (copy from `.env.example`). `.env` is gitignored — never committed.
+
 ## Credit
 
-Core skill framework and CLI architecture by [Santiago Fernandez (santifer)](https://github.conal README preserved at [UPSTREAM_README.md](UPSTREAM_README.md).
+Core skill framework and CLI architecture by [Santiago Fernandez (santifer)](https://github.com/santifer/career-ops). Original README preserved at [UPSTREAM_README.md](UPSTREAM_README.md).
 
 This fork is MIT licensed (same as upstream).
