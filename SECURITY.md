@@ -1,6 +1,6 @@
 # Security Policy
 
-This is a **personal portfolio fork** of [santifer/career-ops](https://github.com/santifer/career-ops). There is no hosted service, no production deployment, and no shared infrastructure — the system runs entirely on a user's local machine.
+This is my **personal fork** of [santifer/career-ops](https://github.com/santifer/career-ops), used as a portfolio piece. There is no hosted service, no production deployment, and no shared infrastructure — the system runs entirely on a user's local machine.
 
 ## Reporting a vulnerability
 

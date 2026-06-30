@@ -1,6 +1,6 @@
 # Contributing
 
-This is a **personal portfolio fork** of [santifer/career-ops](https://github.com/santifer/career-ops). It mirrors my actual daily-use codebase and is not actively soliciting external contributions.
+This is my **personal fork** of [santifer/career-ops](https://github.com/santifer/career-ops) — a portfolio piece that mirrors my actual daily-use codebase. It is not actively soliciting external contributions.
 
 ## Where to send contributions
 
