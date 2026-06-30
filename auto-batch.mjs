@@ -720,10 +720,10 @@ function scheduleRetryFromRateLimitHint() {
         <string>/usr/bin/caffeinate</string>
         <string>-s</string>
         <string>/usr/local/bin/node</string>
-        <string>/Users/ravidureddy/Desktop/career-ops/auto-batch.mjs</string>
+        <string>${join(PROJECT_DIR, 'auto-batch.mjs')}</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/ravidureddy/Desktop/career-ops</string>
+    <string>${PROJECT_DIR}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
