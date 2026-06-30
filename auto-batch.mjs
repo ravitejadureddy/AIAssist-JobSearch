@@ -395,14 +395,31 @@ async function trySuffixExpansion(baseName) {
   return { count: 0, foundAs: null };
 }
 
-const HARD_REJECT_KEYWORDS = [
+// Sponsorship-rejection patterns apply only if the user actually needs sponsorship;
+// clearance-rejection patterns apply for everyone (rare for adopters to hold clearance).
+// Driven by visa_status in config/profile.yml; safe-default is "needs sponsorship".
+const PROFILE_YML = join(PROJECT_DIR, 'config', 'profile.yml');
+function userNeedsSponsorship() {
+  if (!existsSync(PROFILE_YML)) return true;
+  const m = readFileSync(PROFILE_YML, 'utf-8').match(/visa_status\s*:\s*['"]?([^'"\n]+)['"]?/);
+  if (!m) return true;
+  return !/no sponsorship needed|us citizen|green card|permanent resident/.test(m[1].toLowerCase());
+}
+const SPONSORSHIP_REJECT = [
   'no visa sponsorship', 'will not sponsor', 'unable to sponsor', 'cannot sponsor',
   'sponsorship not available', 'us citizens only', 'us citizen only',
   'must be a us citizen', 'must be authorized to work without sponsorship',
   'must not require sponsorship', 'not require sponsorship now or in the future',
-  'security clearance required', 'active security clearance', 'secret clearance',
-  'top secret clearance', 'green card required', 'permanent resident required',
+  'green card required', 'permanent resident required',
   'must be a permanent resident', 'no sponsorship',
+];
+const CLEARANCE_REJECT = [
+  'security clearance required', 'active security clearance', 'secret clearance',
+  'top secret clearance',
+];
+const HARD_REJECT_KEYWORDS = [
+  ...(userNeedsSponsorship() ? SPONSORSHIP_REJECT : []),
+  ...CLEARANCE_REJECT,
 ];
 
 const JS_BLOCKED_DOMAINS = [

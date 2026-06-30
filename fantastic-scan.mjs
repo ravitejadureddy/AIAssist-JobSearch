@@ -58,20 +58,35 @@ const BASE_QUERIES = [
 
 // ── Change 5: Hard-reject keyword patterns (title-level pre-filter) ───────────
 // Applied before any token is spent on evaluation. These phrases in a job title
-// are unambiguous disqualifiers for this candidate's visa/sponsorship situation.
-const HARD_REJECT_PATTERNS = [
+// are unambiguous disqualifiers for the configured visa/sponsorship situation.
+// Sponsorship patterns are gated by visa_status in config/profile.yml; clearance
+// patterns always apply. Safe-default = "needs sponsorship" if profile missing.
+const PROFILE_YML = join(BASE_DIR, 'config', 'profile.yml');
+function userNeedsSponsorship() {
+  if (!existsSync(PROFILE_YML)) return true;
+  const m = readFileSync(PROFILE_YML, 'utf-8').match(/visa_status\s*:\s*['"]?([^'"\n]+)['"]?/);
+  if (!m) return true;
+  return !/no sponsorship needed|us citizen|green card|permanent resident/.test(m[1].toLowerCase());
+}
+const SPONSORSHIP_REJECT_PATTERNS = [
   'no sponsorship',
   'will not sponsor',
   'no visa',
   'us citizen',         // catches "US Citizens only", "Must be US Citizen"
   'u.s. citizen',
+  'green card required',
+  'permanent resident only',
+];
+const CLEARANCE_REJECT_PATTERNS = [
   'clearance required',
   'active clearance',
   'secret clearance',
   'top secret',
   'ts/sci',
-  'green card required',
-  'permanent resident only',
+];
+const HARD_REJECT_PATTERNS = [
+  ...(userNeedsSponsorship() ? SPONSORSHIP_REJECT_PATTERNS : []),
+  ...CLEARANCE_REJECT_PATTERNS,
 ];
 
 function isHardRejectTitle(title) {

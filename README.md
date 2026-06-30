@@ -3,6 +3,29 @@
 > **An extensively enhanced fork of [santifer/career-ops](https://github.com/santifer/career-ops).**
 > The upstream provides the core CLI/skill framework. This fork adds the dashboard, validation framework, fill-agent reliability layer, and production lifecycle management for a polished daily-use experience.
 
+## Why I built this
+
+After leaving Innovaccer in May 2026 to pursue Senior Data Engineer roles, I needed to evaluate hundreds of openings per week while accounting for H-1B sponsorship signals, technical fit, and seniority — without copy-pasting myself into burnout. I forked [santifer/career-ops](https://github.com/santifer/career-ops) because the CLI/skill architecture was solid, then built out the pieces I needed for production-grade daily use: live SSE dashboard, semantic CV validator, resilient Playwright fill agent, and a launchd-driven 24/7 pipeline.
+
+In the months since: **1,643 jobs evaluated · 2,738 evaluation reports written · 869 tailored CVs generated · 99 applications submitted** — all running on my laptop with launchd + Claude Code.
+
+## Quick Start
+
+Requires: macOS or Linux, Node.js 20+, [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (or any [open-agent-skill](https://agentskills.io) CLI like Gemini, OpenCode, Qwen, Copilot, Codex).
+
+```bash
+git clone https://github.com/ravitejadureddy/AIAssist-JobSearch.git
+cd AIAssist-JobSearch
+node doctor.mjs        # tells you what's missing
+claude                 # opens Claude Code — it walks you through CV, profile, portals interactively
+```
+
+After ~10 minutes of guided setup, paste any job URL and get a full evaluation report + tailored PDF in ~60 seconds.
+
+> **Heads-up on visa status:** During onboarding you'll set `visa_status` in `config/profile.yml` (e.g. `"US Citizen"`, `"Green Card"`, `"Requires H-1B sponsorship"`). The job scanner and batch filter read this to gate sponsorship-rejection signals. If your value matches `us citizen` / `green card` / `permanent resident` / `no sponsorship needed` (case-insensitive partial match), sponsorship-rejection filters skip — so you don't lose roles requiring US citizenship. Clearance filters always apply.
+
+For 24/7 automation (daily scans + batch evaluation), see [Setup automation](#setup-automation-optional) below.
+
 ## What I built on top of the upstream
 
 The core skill framework comes from santifer. The following are my additions:
