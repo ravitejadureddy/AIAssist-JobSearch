@@ -5,9 +5,11 @@
 
 ## Why I built this
 
-After leaving Innovaccer in May 2026 to pursue Senior Data Engineer roles, I needed to evaluate hundreds of openings per week while accounting for H-1B sponsorship signals, technical fit, and seniority — without copy-pasting myself into burnout. I forked [santifer/career-ops](https://github.com/santifer/career-ops) because the CLI/skill architecture was solid, then built out the pieces I needed for production-grade daily use: live SSE dashboard, semantic CV validator, resilient Playwright fill agent, and a launchd-driven 24/7 pipeline.
+Evaluating job openings at scale is a high-context decision problem. Each posting needs to be weighed against your CV, your work-authorization situation, your compensation range, and your career trajectory — and doing that manually for hundreds of roles burns hours that should go into interview prep.
 
-In the months since: **1,643 jobs evaluated · 2,738 evaluation reports written · 869 tailored CVs generated · 99 applications submitted** — all running on my laptop with launchd + Claude Code.
+I forked [santifer/career-ops](https://github.com/santifer/career-ops) because the CLI/skill architecture was solid, then built the production layer I wanted for daily use: a live SSE dashboard, a 5-axis semantic CV validator, a resilient Playwright fill agent, and a launchd-driven 24/7 pipeline.
+
+Running it through thousands of evaluations and hundreds of tailored CVs has been a forcing function for reliability — every flaky selector, rate limit, and edge case eventually got fixed.
 
 ## Quick Start
 
