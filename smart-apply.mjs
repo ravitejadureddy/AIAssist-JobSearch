@@ -671,6 +671,8 @@ async function fillGreenhouse(page, job, answersData, resumePath) {
 // ─── Lever filler ─────────────────────────────────────────────────────────────
 async function fillLever(page, job, answersData, resumePath) {
   const p = answersData.profile;
+  const cvData = parseCV();
+  const currentCompany = cvData.experience[0]?.company || '';
   const needsAnswer = [];
 
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
@@ -687,7 +689,7 @@ async function fillLever(page, job, answersData, resumePath) {
   await setField('input[name="name"]', p.full_name);
   await setField('input[name="email"]', p.email);
   await setField('input[name="phone"]', p.phone);
-  await setField('input[name="org"], input[name="company"]', 'Innovaccer Inc.');
+  if (currentCompany) await setField('input[name="org"], input[name="company"]', currentCompany);
   await setField('input[name="linkedin"], input[placeholder*="LinkedIn"]', p.linkedin);
   await setField('input[name="urls[LinkedIn]"]', p.linkedin);
 

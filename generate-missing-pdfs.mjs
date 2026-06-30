@@ -244,46 +244,24 @@ The JSON MUST match this schema exactly:
   ]
 }
 
-## MANDATORY rules from modes/_profile.md "CV Format Standards"
-These are validated. JSON that violates them will produce a bad PDF.
+## MANDATORY rules — read from ${PROFILE_MD}
+The candidate's "CV Format Standards" section in ${PROFILE_MD} is authoritative. Apply ALL its rules verbatim:
+- Skills categories in the exact order defined there (and any healthcare-JD exception)
+- Per-employer bullet count minimums and maximums — validate these before writing the JSON
+- Education date format
+- Within each skills category, you may reorder items by JD relevance, but never reorder categories themselves
 
-### Skills (8 categories, exact order — no JD-based reorder):
-1. Languages — Python, SQL, PySpark (ALWAYS first, no exception)
-2. Data Platform — Snowflake, dbt, data modeling, incremental pipelines
-3. Orchestration — Airflow, Kubernetes, Jenkins, CI/CD for data pipelines
-4. Streaming — Kafka, ETL/ELT at scale
-5. Cloud & Storage — AWS (S3, EC2, RDS), PostgreSQL, MongoDB
-6. Search & Observability — Elasticsearch, Kibana, data quality monitoring, pipeline observability
-7. BI & Reporting — Power BI, Tableau
-8. Dev Tools — GitLab, VSCode, Linux
-
-Exception: ONLY for healthcare-specific JDs (HL7/FHIR/EDI in the JD), a "Healthcare Data" category may appear first. For all other roles Languages is first. Within each category, you may reorder items by JD relevance — but do NOT reorder categories.
-
-### Per-employer bullet counts (HARD requirements):
-- Innovaccer Inc. (primary role): 6-7 bullets — NEVER trim below 6
-- Optum (UnitedHealth Group): 4-5 bullets — use all 5 standard bullets from cv.md
-- Deloitte Consulting: EXACTLY 2 bullets
-- Accenture: EXACTLY 2 bullets
-
-Bullets are reordered within each job by JD relevance (most relevant first), never reduced below these minimums.
-
-### Education date format:
-ALWAYS full ranges with en-dash (–), e.g. "Aug 2018 – Dec 2019" and "Aug 2012 – Jun 2016". Never bare year.
-
-### Other rules:
+### Other rules (apply regardless of profile):
 - All text from cv.md. NEVER invent metrics, tools, employers, dates, or skills.
 - Projects: cv.md has none → "projects": []
 - Certifications: cv.md has none → "certifications": []
 - <strong>…</strong> permitted sparingly inside bullets/summary to highlight JD-matched keywords.
 
 ## Validation checklist (verify before writing the file)
-- [ ] skills[0].category === "Languages" (or "Healthcare Data" only if JD is HL7/FHIR/EDI healthcare)
-- [ ] skills array has 8 categories in the documented order
-- [ ] experience[0].company contains "Innovaccer" and has 6+ bullets
-- [ ] Optum entry has 4+ bullets
-- [ ] Deloitte entry has exactly 2 bullets
-- [ ] Accenture entry has exactly 2 bullets
-- [ ] Education entries use full "Mon Year – Mon Year" with en-dash
+- [ ] skills[0].category matches the first category defined in ${PROFILE_MD} (or the healthcare exception if applicable)
+- [ ] skills array has the same categories in the same order as ${PROFILE_MD}
+- [ ] Each experience entry's bullets count falls within the min/max range defined for that employer in ${PROFILE_MD}
+- [ ] Education entries use full "Mon Year – Mon Year" with en-dash (e.g. "Aug 2018 – Dec 2019")
 
 ## Step 4 — Write the JSON file and verify
 After writing, run: ls -lh "${contentJsonPath}"

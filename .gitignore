@@ -80,10 +80,17 @@ reports/*.pdf
 # IDE
 .idea/
 *.swp
-*.swo# Stale orphaned scripts — kept locally but not in public repo
+*.swo
+
+# Stale orphaned scripts — kept locally but not in public repo
 batch-pdf-gen.mjs
 batch-pdf-gen-dexian.mjs
 generate-custom-pdf.mjs
 extract_resume.py
 data/h1b-cache.tsv.bak/
 interview-prep/
+
+# Orphan one-off utilities with hardcoded personal data — kept locally
+validate-cv.mjs
+resolve-blocked-apply-queue.mjs
+prune-apply-queue.mjs
