@@ -102,6 +102,15 @@ flowchart LR
 ├── start.sh                   # Lifecycle orchestrator (3s clean shutdown)
 └── launch-chrome.sh           # Dedicated Chrome with fill-agent profile
 
+## Documentation
+
+- **[PIPELINE.md](docs/PIPELINE.md)** — End-to-end journeys with Mermaid diagrams. What happens between a job URL entering the system and an application being submitted. Includes state machines, Gate1 h1b flow with visa-status gating, and design principles.
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — Component-oriented reference. Every subsystem (ingest, orchestration, Phase 2, CV generation, semantic validation, tracker, dashboard, fill agent) with the enhancements this fork adds vs upstream.
+- **[DEBUGGING.md](docs/DEBUGGING.md)** — Practical Q&A for common failures. "A job was filtered — why?", "Fill agent isn't clicking a button", "h1b-cache says the wrong thing", etc. Real commands with expected outputs.
+- **[SETUP.md](docs/SETUP.md)** — First-run guide (adopters clone here).
+- **[SCRIPTS.md](docs/SCRIPTS.md)** — `npm run <cmd>` cheat sheet.
+- **[CUSTOMIZATION.md](docs/CUSTOMIZATION.md)** — How to adapt archetypes, scoring, portal list.
+
 ## Setup automation (optional)
 
 The system works fine as a manual tool, but you can run portal scans and batch evaluations on a daily schedule.
