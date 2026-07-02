@@ -568,6 +568,10 @@ main() {
       if [[ "$status" == "completed" ]]; then
         continue
       fi
+      # Skip jobs already filtered by Gate1 (auto-batch.mjs syncs FILTER verdicts here)
+      if [[ "$status" == "gate1_filtered" ]]; then
+        continue
+      fi
       # Skip failed offers that hit retry limit (unless --retry-failed)
       if [[ "$status" == "failed" ]]; then
         local retries

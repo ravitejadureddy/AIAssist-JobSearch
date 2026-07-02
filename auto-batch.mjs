@@ -643,13 +643,17 @@ async function runGate1() {
         cache.set(cacheSlug, { total_lca: lcaCount, last_checked: new Date().toISOString().slice(0, 10) });
       }
 
-      // Step D: explicit sponsor override for low LCA
+      // Step D: LCA threshold check — only applies if user needs sponsorship.
       // For LinkedIn without JD: lower threshold to 1 — any LCA history passes.
       // The batch worker will do full keyword + sponsor screening with the real JD.
-      const hasExplicitSponsor = jdText && /will sponsor.*h.?1.?b|h.?1.?b.*sponsor|visa sponsorship (provided|available|offered)/i.test(jdText);
-      const minLca = isLinkedInNoJd ? 1 : 10;
-      if (lcaCount < minLca && !hasExplicitSponsor) {
-        return { ...job, company, status: 'FILTER', lca: lcaCount, reason: `lca:${lcaCount}` };
+      // For users who don't need sponsorship (US Citizen / Green Card / Permanent Resident),
+      // LCA count is informational only — all companies with legitimate JDs proceed.
+      if (userNeedsSponsorship()) {
+        const hasExplicitSponsor = jdText && /will sponsor.*h.?1.?b|h.?1.?b.*sponsor|visa sponsorship (provided|available|offered)/i.test(jdText);
+        const minLca = isLinkedInNoJd ? 1 : 10;
+        if (lcaCount < minLca && !hasExplicitSponsor) {
+          return { ...job, company, status: 'FILTER', lca: lcaCount, reason: `lca:${lcaCount}` };
+        }
       }
 
       return { ...job, company, status: 'PASS', lca: lcaCount, reason: '-' };
@@ -683,6 +687,57 @@ async function runGate1() {
   }
   log(`gate1: ${passed.length} passed to Phase 1`);
   return filtered.length;
+}
+
+// ── Sync Gate1 FILTER verdicts into batch-state.tsv ──────────────────────────
+// After runGate1(), any job marked as FILTER in gate1-results.tsv should also
+// be marked as `gate1_filtered` in batch-state.tsv so batch-runner.sh and
+// playwright-prefetch.mjs skip them instead of wasting Claude tokens / JD
+// fetches on jobs that were already rejected by the LCA/keyword screen.
+// Idempotent: does not touch rows already `completed` / `failed` / `gate1_filtered`.
+function syncGate1FiltersToState() {
+  if (!existsSync(GATE1_RESULTS) || !existsSync(INPUT_FILE)) return 0;
+
+  // Read gate1 FILTER entries: id -> reason
+  const filtered = new Map();
+  for (const line of readFileSync(GATE1_RESULTS, 'utf-8').split('\n')) {
+    const p = line.split('\t');
+    if (p.length < 4 || p[0] === 'id' || p[1] !== 'FILTER') continue;
+    filtered.set(p[0], p[3]);
+  }
+  if (filtered.size === 0) return 0;
+
+  // Read batch-input for URLs
+  const urls = new Map();
+  for (const line of readFileSync(INPUT_FILE, 'utf-8').split('\n')) {
+    const p = line.split('\t');
+    if (p[0] && p[0] !== 'id') urls.set(p[0], p[1]);
+  }
+
+  // Read existing state
+  const existing = new Map();
+  if (existsSync(STATE_FILE)) {
+    for (const line of readFileSync(STATE_FILE, 'utf-8').split('\n')) {
+      const p = line.split('\t');
+      if (p[0] && p[0] !== 'id') existing.set(p[0], p[2]);
+    }
+  } else {
+    // Initialize state file with header if it doesn't exist yet
+    writeFileSync(STATE_FILE, 'id\turl\tstatus\tstarted_at\tcompleted_at\treport_num\tscore\terror\tretries\n');
+  }
+
+  const now = new Date().toISOString();
+  const rows = [];
+  for (const [id, reason] of filtered) {
+    const currentStatus = existing.get(id);
+    // Skip if job is already in a terminal or gate1-filtered state
+    if (currentStatus === 'completed' || currentStatus === 'failed' || currentStatus === 'gate1_filtered') continue;
+    const url = urls.get(id) || '';
+    rows.push(`${id}\t${url}\tgate1_filtered\t${now}\t${now}\t\t\tgate1:${reason}\t0`);
+  }
+  if (rows.length) appendFileSync(STATE_FILE, rows.join('\n') + '\n');
+  log(`gate1-filter sync: marked ${rows.length} jobs as gate1_filtered in batch-state.tsv`);
+  return rows.length;
 }
 
 // ── Dynamic retry scheduling based on rate-limit reset hint ──────────────────
@@ -785,6 +840,7 @@ function scheduleRetryFromRateLimitHint() {
 
   log(`pending jobs detected (${newItems} new + ${resetCount} rate-limit resets) — starting batch`);
   await runGate1();              // filter H1B + hard-reject keywords before spawning Claude workers
+  syncGate1FiltersToState();     // mark FILTER'd jobs as gate1_filtered so downstream steps skip them
   playwrightPrefetch();          // handles JS-blocked jobs that passed Gate 1
   syncResolvedUrlsToBatchState();// Fix E: rewrite LinkedIn → resolved ATS URLs before evaluator workers run
   runBatch();

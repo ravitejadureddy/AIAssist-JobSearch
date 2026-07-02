@@ -115,7 +115,7 @@ function loadLinkedInPendingJobs() {
     if (!id || !url || !isLinkedIn(url)) continue;
     if (SINGLE_ID && id !== SINGLE_ID) continue;
     const status  = statusMap.get(id) || 'none';
-    if (status === 'completed' || status === 'skipped') continue;
+    if (status === 'completed' || status === 'skipped' || status === 'gate1_filtered') continue;
     const jdFile  = `/tmp/batch-jd-${id}.txt`;
     if (existsSync(jdFile)) continue; // already prefetched
     jobs.push({ id, url });
