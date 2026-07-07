@@ -217,6 +217,7 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 | Asks about rejection patterns or wants to improve targeting | `patterns` |
 | Asks about follow-ups or application cadence | `followup` |
 | Wants to update the system | `update` |
+| Wants to run a full pipeline health check / audit | `health-check` |
 
 ### CV Source of Truth
 
