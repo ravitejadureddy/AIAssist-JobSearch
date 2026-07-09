@@ -1,0 +1,96 @@
+# Personal data (user fills these)
+cv.md
+data/applications.md
+data/applications-meta.json
+data/pipeline.md
+data/scan-history.tsv
+reports/*.md
+!reports/.gitkeep
+output/*
+!output/.gitkeep
+batch/logs/*
+!batch/logs/.gitkeep
+batch/batch-state.tsv
+batch/batch-input.tsv
+batch/tracker-additions/**/*.tsv
+!batch/tracker-additions/.gitkeep
+jds/*
+!jds/.gitkeep
+
+# Writing samples (user's personal files — never committed)
+writing-samples/*
+!writing-samples/README.md
+
+# User config and customization (never auto-updated)
+config/profile.yml
+portals.yml
+modes/_profile.md
+.update-dismissed
+.update-lock
+
+# Secrets (never commit — use .env.example as template)
+.env
+
+# Generated
+.resolved-prompt-*
+node_modules/
+bun.lock
+
+# OS
+.DS_Store
+*.mov
+*.mp4
+
+# Claude Code local
+.claude/settings.local.json
+.claude/settings.json
+.claude/memory/
+career-dashboard
+package-lock.json
+
+# Personal browser & session data (NEVER commit)
+data/linkedin-session.json
+data/chrome-profile/
+data/apply-screenshots/
+data/apply-status/
+data/application_answers.json
+data/h1b-cache.tsv
+data/inbox.md
+data/pipeline-export.csv
+data/applications.md.bak
+
+# Personal resume files
+Resume/
+Resume_Exp_Points/
+Operating Role/
+
+# Batch personal data
+batch/gate1-results.tsv
+batch/phase1-prompt.md
+batch/pipeline-rows/
+batch/errors/
+batch/error-*.json
+
+# Logs
+logs/
+
+# Reports (PDFs are generated output, not source)
+reports/*.pdf
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Stale orphaned scripts — kept locally but not in public repo
+batch-pdf-gen.mjs
+batch-pdf-gen-dexian.mjs
+generate-custom-pdf.mjs
+extract_resume.py
+data/h1b-cache.tsv.bak/
+interview-prep/
+
+# Orphan one-off utilities with hardcoded personal data — kept locally
+validate-cv.mjs
+resolve-blocked-apply-queue.mjs
+prune-apply-queue.mjs

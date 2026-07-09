@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd-scan.plist.example — Daily portal scan + batch chain for career-ops
+  ──────────────────────────────────────────────────────────────────────────
+  Runs a 4-step pipeline at 6pm daily:
+
+    1. fantastic-scan.mjs --verify  → pull new jobs from Fantastic Jobs API
+    2. scan.mjs                     → scan Greenhouse / Ashby / Lever portals
+    3. playwright-prefetch.mjs      → pre-fetch JS-blocked sites (Workday, Taleo, Dayforce)
+    4. auto-batch.mjs               → evaluate all pending JDs with Claude
+
+  By the next morning, your tracker has fresh entries with full evaluation reports.
+
+  Setup:  see templates/launchd-batch.plist.example header — same steps.
+
+  Notes:
+    • No Fantastic Jobs key? Remove the
+      "/usr/local/bin/node __PROJECT_DIR__/fantastic-scan.mjs --verify;"
+      fragment from the ProgramArguments string. The remaining 3 steps
+      (Greenhouse/Ashby/Lever scan + prefetch + batch) still work.
+    • To add prune-apply-queue or other custom steps, append them to the
+      shell pipeline (separated by ';' for sequential, '&&' for stop-on-error).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.careerops.scan</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>/usr/local/bin/node __PROJECT_DIR__/fantastic-scan.mjs --verify; /usr/local/bin/node __PROJECT_DIR__/scan.mjs; /usr/local/bin/node __PROJECT_DIR__/playwright-prefetch.mjs --max-runtime 25; /usr/local/bin/node __PROJECT_DIR__/auto-batch.mjs</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>FANTASTIC_JOBS_API_KEY</key>
+        <string>__YOUR_FANTASTIC_JOBS_API_KEY__</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Fires at 6pm daily. launchd auto-retries on next wake if Mac was asleep at fire time. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>18</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/careerops-scan.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/careerops-scan-error.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
