@@ -3,40 +3,26 @@
 ## Prerequisites
 
 - An AI coding CLI — [Claude Code](https://claude.ai/code), Gemini CLI, Codex, Qwen Code, OpenCode or GitHub Copilot CLI
-- [Node.js](https://nodejs.org) 18+ and `git` (`npx` ships with Node — the installer refuses to run without them)
+- [Node.js](https://nodejs.org) 18+ and `git`
 - (Optional) Go 1.21+ (for the dashboard TUI)
 
 ## Quick Start
 
-### Recommended — one command
+### Clone and install
 
 ```bash
-npx @santifer/career-ops init
-```
-
-`npx` ships with Node.js — it runs the installer once without installing anything globally. This clones the latest release into `./career-ops` and installs dependencies. Then move into the workspace and open your AI CLI:
-
-```bash
-cd career-ops
-claude   # or gemini / codex / qwen / opencode
-```
-
-**On first launch, career-ops walks you through setup by chatting** — it asks for your CV, your details (name, target roles, salary), and sets up the job scanner with pre-configured companies. Nothing to edit by hand: just answer its questions. Then paste a job offer URL or description and it evaluates it, writes a report, generates a tailored PDF, and tracks it.
-
-### Advanced — clone manually
-
-<details>
-<summary>Prefer to clone the repo yourself?</summary>
-
-```bash
-git clone https://github.com/santifer/career-ops.git
-cd career-ops
+git clone https://github.com/ravitejadureddy/AIAssist-JobSearch.git
+cd AIAssist-JobSearch
 npm install
 ```
 
-Then open your AI CLI in the folder — the same first-run onboarding applies. Use this path if you want to track a specific branch, contribute, or audit the code before installing dependencies.
+Then open your AI CLI in the folder:
 
-</details>
+```bash
+claude   # or gemini / codex / qwen / opencode
+```
+
+**On first launch, the system walks you through setup by chatting** — it asks for your CV, your details (name, target roles, salary), and sets up the job scanner with pre-configured companies. Nothing to edit by hand: just answer its questions. Then paste a job offer URL or description and it evaluates it, writes a report, generates a tailored PDF, and tracks it.
 
 ### PDF rendering (one-time)
 

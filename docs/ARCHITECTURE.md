@@ -208,7 +208,7 @@ Wrapped ATS detection: some employers use LinkedIn Job IDs that redirect to thei
 
 ### Personalization layer
 
-Three files hold user-specific configuration. **None** are auto-updated by `update-system.mjs`:
+Three files hold user-specific configuration. They are the source of truth for personalization — never edited by code updates:
 
 - `cv.md` — source-of-truth CV. Referenced during evaluation, CV generation, and fill agent.
 - `config/profile.yml` — identity + comp targets + visa status. YAML.

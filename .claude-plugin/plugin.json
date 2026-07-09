@@ -1,10 +1,10 @@
 {
-  "name": "career-ops",
-  "version": "1.6.0",
+  "name": "aiassist-jobsearch",
+  "version": "1.0.0",
   "description": "AI job search command center — evaluate offers, generate CVs, scan portals, track applications",
   "author": {
-    "name": "santifer",
-    "url": "https://santifer.io"
+    "name": "ravitejadureddy",
+    "url": "https://github.com/ravitejadureddy"
   },
   "skills": true,
   "permissions": {

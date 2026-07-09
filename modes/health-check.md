@@ -153,7 +153,7 @@ Read `cv.md` first to extract the actual employer names and metrics for this can
 
 Any match in a system-layer file = FAIL. It should be parameterized from user-layer files at runtime, not hardcoded. Report `file:line` of each hit with the offending substring.
 
-Rationale: `update-system.mjs` overwrites system-layer files on upstream updates. Any personalization there gets nuked. Also: personalization in system-layer means leakage risk during public-repo scrutiny.
+Rationale: personalization in system-layer files means leakage risk during public-repo scrutiny, and any refactor or code update to those files can silently drop the customization.
 
 ## Category 14 — Dynamic end-to-end verification
 

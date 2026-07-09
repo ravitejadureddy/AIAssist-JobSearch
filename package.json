@@ -1,7 +1,7 @@
 {
-  "name": "career-ops",
-  "version": "1.9.0",
-  "description": "AI-powered job search pipeline built on Claude Code",
+  "name": "aiassist-jobsearch",
+  "version": "1.0.0",
+  "description": "AI-powered job search pipeline: live SSE dashboard, semantic CV validator, Playwright fill agent, and launchd-driven automation",
   "private": true,
   "scripts": {
     "doctor": "node doctor.mjs",
@@ -11,9 +11,6 @@
     "merge": "node merge-tracker.mjs",
     "pdf": "node generate-pdf.mjs",
     "sync-check": "node cv-sync-check.mjs",
-    "update:check": "node update-system.mjs check",
-    "update": "node update-system.mjs apply",
-    "rollback": "node update-system.mjs rollback",
     "liveness": "node check-liveness.mjs",
     "scan": "node scan.mjs",
     "patterns": "node analyze-patterns.mjs",
@@ -24,15 +21,13 @@
     "job-search",
     "claude-code",
     "career",
-    "career-ops",
-    "careerops",
     "automation"
   ],
-  "author": "Santiago Fernández de Valderrama <hi@santifer.io> (https://santifer.io)",
-  "homepage": "https://santifer.io",
+  "author": "Ravi Teja Dureddy <raviteja.dureddy@gmail.com>",
+  "homepage": "https://github.com/ravitejadureddy/AIAssist-JobSearch",
   "repository": {
     "type": "git",
-    "url": "https://github.com/santifer/career-ops"
+    "url": "https://github.com/ravitejadureddy/AIAssist-JobSearch"
   },
   "license": "MIT",
   "dependencies": {

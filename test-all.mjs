@@ -71,7 +71,6 @@ const scripts = [
   { name: 'dedup-tracker.mjs', expectExit: 0 },
   { name: 'merge-tracker.mjs', expectExit: 0 },
   { name: 'analyze-patterns.mjs --self-test', expectExit: 0 },
-  { name: 'update-system.mjs check', expectExit: 0 },
 ];
 
 for (const { name, allowFail } of scripts) {
@@ -491,7 +490,7 @@ console.log('\n11. Version file');
 
 if (fileExists('VERSION')) {
   // VERSION may carry a release-please marker, e.g. "1.9.0 # x-release-please-version".
-  // Validate the first whitespace-delimited token, mirroring update-system.mjs parseVersionFile().
+  // Validate the first whitespace-delimited token.
   const version = readFile('VERSION').trim().split(/\s+/)[0];
   if (/^\d+\.\d+\.\d+$/.test(version)) {
     pass(`VERSION is valid semver: ${version}`);
