@@ -38,6 +38,31 @@ function toSlug(name) {
   return String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
+// Mirror of safeNormalize() in auto-batch.mjs — Gate 1 caches under the
+// normalised name, so the backfill has to reverse the same normalisation
+// to find those entries.
+function safeNormalize(name) {
+  let n = String(name);
+  n = n.replace(/\s*\([^)]{1,10}\)$/, '').trim();
+  n = n.replace(/,?\s+(Inc\.?|LLC\.?|Ltd\.?|Corp\.?|Corporation|L\.?P\.?|L\.?L\.?C\.?|Incorporated|Limited|Co\.)$/i, '').trim();
+  n = n.replace(/\.$/, '').trim();
+  return n;
+}
+
+// Look up a company in the LCA cache, trying variants that Gate 1 might
+// have used as the cache key.
+function lookupLca(cache, company) {
+  const candidates = [
+    company,
+    safeNormalize(company),
+  ];
+  for (const c of candidates) {
+    const slug = toSlug(c);
+    if (cache.has(slug)) return { lca: cache.get(slug), matched: c };
+  }
+  return null;
+}
+
 // Mirror of parseH1B (dashboard-server.mjs:391) + parseH1BLabel (queue-eligibility.mjs:44).
 // Returns a non-null value → row is already tagged, skip it.
 function parseH1B(notes) {
@@ -131,14 +156,13 @@ function main() {
 
     let newTag;
     if (needsSponsorship) {
-      const slug = toSlug(company);
-      const count = cache.get(slug);
-      if (count === undefined) {
+      const hit = lookupLca(cache, company);
+      if (!hit) {
         noCacheHit++;
         if (missingCompanies.length < 20) missingCompanies.push(company);
         return line; // can't backfill without cache
       }
-      newTag = `${tagFromCount(count)} (backfilled)`;
+      newTag = `${tagFromCount(hit.lca)} (backfilled)`;
     } else {
       newTag = 'Sponsorship: not required (backfilled)';
     }
