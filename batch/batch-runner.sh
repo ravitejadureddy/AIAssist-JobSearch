@@ -20,11 +20,29 @@ LOGS_DIR="$BATCH_DIR/logs"
 TRACKER_DIR="$BATCH_DIR/tracker-additions"
 REPORTS_DIR="$PROJECT_DIR/reports"
 APPLICATIONS_FILE="$PROJECT_DIR/data/applications.md"
+GATE1_RESULTS_FILE="$BATCH_DIR/gate1-results.tsv"
+PROFILE_YML="$PROJECT_DIR/config/profile.yml"
 LOCK_FILE="$BATCH_DIR/batch-runner.pid"
 STATE_LOCK_DIR="$BATCH_DIR/.batch-state.lock"
 STATE_LOCK_PID_FILE="$STATE_LOCK_DIR/pid"
 STATE_LOCK_TIMEOUT_SECONDS=30
 MAIN_PID="${BASHPID:-$$}"
+
+# Decide once at startup whether the user needs H-1B sponsorship.
+# Mirrors userNeedsSponsorship() in auto-batch.mjs / queue-eligibility.mjs.
+# Safe default = "needs sponsorship" if profile is missing or unparseable.
+NEEDS_SPONSORSHIP=1
+if [[ -f "$PROFILE_YML" ]]; then
+  visa_lower=$(grep -E '^[[:space:]]*visa_status[[:space:]]*:' "$PROFILE_YML" 2>/dev/null | \
+    head -1 | sed -E 's/^[[:space:]]*visa_status[[:space:]]*:[[:space:]]*//; s/^["'"'"']//; s/["'"'"']$//' | \
+    tr '[:upper:]' '[:lower:]' || true)
+  if [[ "$visa_lower" == *"us citizen"* ]] || \
+     [[ "$visa_lower" == *"green card"* ]] || \
+     [[ "$visa_lower" == *"permanent resident"* ]] || \
+     [[ "$visa_lower" == *"no sponsorship needed"* ]]; then
+    NEEDS_SPONSORSHIP=0
+  fi
+fi
 
 # Defaults
 PARALLEL=1
@@ -363,10 +381,25 @@ process_offer() {
 
   local log_file="$LOGS_DIR/${report_num}-${id}.log"
 
+  # Resolve LCA_COUNT for this job:
+  #   - Citizens / non-sponsorship users → "n/a" (Gate 1 skipped the lookup)
+  #   - Sponsorship users → read from gate1-results.tsv
+  #   - Fallback if Gate 1 row is missing → "unknown"
+  local lca_count
+  if [[ $NEEDS_SPONSORSHIP -eq 0 ]]; then
+    lca_count="n/a"
+  else
+    lca_count=""
+    if [[ -f "$GATE1_RESULTS_FILE" ]]; then
+      lca_count=$(awk -F'\t' -v id="$id" '$1==id { print $3; exit }' "$GATE1_RESULTS_FILE" 2>/dev/null || true)
+    fi
+    [[ -z "$lca_count" ]] && lca_count="unknown"
+  fi
+
   # Prepare system prompt with placeholders resolved
   local resolved_prompt="$BATCH_DIR/.resolved-prompt-${id}.md"
   # Escape sed delimiter characters in variables to prevent substitution breakage
-  local esc_url esc_jd_file esc_report_num esc_date esc_id
+  local esc_url esc_jd_file esc_report_num esc_date esc_id esc_lca
   esc_url="${url//\\/\\\\}"
   esc_url="${esc_url//|/\\|}"
   esc_jd_file="${jd_file//\\/\\\\}"
@@ -374,12 +407,14 @@ process_offer() {
   esc_report_num="${report_num//|/\\|}"
   esc_date="${date//|/\\|}"
   esc_id="${id//|/\\|}"
+  esc_lca="${lca_count//|/\\|}"
   sed \
     -e "s|{{URL}}|${esc_url}|g" \
     -e "s|{{JD_FILE}}|${esc_jd_file}|g" \
     -e "s|{{REPORT_NUM}}|${esc_report_num}|g" \
     -e "s|{{DATE}}|${esc_date}|g" \
     -e "s|{{ID}}|${esc_id}|g" \
+    -e "s|{{LCA_COUNT}}|${esc_lca}|g" \
     "$PROMPT_FILE" > "$resolved_prompt"
 
   # Launch claude -p worker.

@@ -82,8 +82,12 @@ function parseH1BLabel(notes) {
   if (lower.includes('h-1b unverified') || lower.includes('h1b unverified') ||
       lower.includes('sponsorship unverified') || lower.includes('verify h-1b') ||
       lower.includes('verify h1b') || lower.includes('sponsorship unclear') ||
-      lower.includes('h-1b uncertain')) {
+      lower.includes('h-1b uncertain') || lower.includes('h-1b unknown') ||
+      lower.includes('h1b unknown')) {
     return 'Unverified';
+  }
+  if (lower.includes('sponsorship: not required') || lower.includes('sponsorship not required')) {
+    return 'N/A';
   }
   return null;
 }

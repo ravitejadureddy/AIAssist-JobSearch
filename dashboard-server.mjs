@@ -442,8 +442,14 @@ function parseH1B(notes) {
   if (lower.includes('h-1b unverified') || lower.includes('h1b unverified') ||
       lower.includes('sponsorship unverified') || lower.includes('verify h-1b') ||
       lower.includes('verify h1b') || lower.includes('sponsorship unclear') ||
-      lower.includes('h-1b uncertain')) {
+      lower.includes('h-1b uncertain') || lower.includes('h-1b unknown') ||
+      lower.includes('h1b unknown')) {
     return { label: 'Unverified', color: '#6b7280' };
+  }
+
+  // ── N/A — user does not need sponsorship (Gate 1 skipped h1bdata lookup) ───
+  if (lower.includes('sponsorship: not required') || lower.includes('sponsorship not required')) {
+    return { label: 'N/A', color: '#0891b2' };
   }
 
   return null;
@@ -1047,6 +1053,7 @@ function renderDashboard(apps, mode, pendingCount) {
       : a.h1b?.label === 'No'           ? '0 LCA filings on record — company likely does not sponsor H-1B'
       : a.h1b?.label === 'Unverified'   ? 'H-1B check ran with errors — verify manually on h1bdata.info'
       : a.h1b?.label === 'Unreachable'  ? 'H-1B lookup failed — verify manually on h1bdata.info'
+      : a.h1b?.label === 'N/A'          ? 'Sponsorship not required for this user — h1bdata lookup skipped'
       : 'H-1B status unknown';
     const h1bCell = a.h1b
       ? `<span class="badge" style="background:${a.h1b.color};font-size:0.75em" title="${esc(h1bTitle)}">${a.h1b.label}</span>`

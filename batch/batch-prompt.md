@@ -52,6 +52,7 @@ Aplicación durante la evaluación A-G:
 | `{{REPORT_NUM}}` | Número de report (3 dígitos, zero-padded: 001, 002...) |
 | `{{DATE}}` | Fecha actual YYYY-MM-DD |
 | `{{ID}}` | ID único de la oferta en batch-input.tsv |
+| `{{LCA_COUNT}}` | LCA filings de h1bdata.info obtenido por Gate 1. Un entero (`0`, `43`, `43059`), `n/a` (usuario no requiere sponsorship — no se consultó h1bdata), o `unknown` (Gate 1 no disponible para este id) |
 
 ---
 
@@ -338,14 +339,18 @@ Formato TSV (una sola línea, sin header, 9 columnas tab-separated):
 
 **REGLA — Structured tags in notes (dashboard parses these):** El campo notes DEBE incluir siempre estas etiquetas en formato parseable:
 
-1. **H1B tag** (una de las siguientes):
-   - `H-1B confirmed (N LCAs)` — LCA count conocido y ≥ 50
-   - `H-1B likely (N LCAs)` — LCA count 10–49
-   - `H-1B low (N LCAs)` — LCA count < 10
-   - `H-1B friendly` — JD indica sponsorship pero sin LCA count
-   - `No H-1B` — JD excluye sponsorship explícitamente
-   - `No H-1B (0 LCAs)` — 0 LCAs confirmados en h1bdata.info (default cuando Gate 1 confirma 0 filings)
-   - `H-1B unreachable` — error de red o proceso al consultar h1bdata.info; verificar manualmente
+1. **H1B tag** — Gate 1 ya consultó h1bdata.info y provee `LCA_COUNT={{LCA_COUNT}}`. USA ese valor. NO adivines, NO consultes h1bdata.info por tu cuenta, NO reemplaces "N LCAs" con un número inventado del JD.
+
+   Reglas deterministas basadas en el valor de `{{LCA_COUNT}}`:
+
+   - Si `{{LCA_COUNT}}` es `n/a` → el usuario NO requiere sponsorship (US Citizen / Green Card / Permanent Resident / no sponsorship needed). Escribe exactamente: `Sponsorship: not required`. NO añadas frases con "H-1B" ni "LCA" en el tag.
+   - Si `{{LCA_COUNT}}` es `unknown` → Gate 1 no procesó este id (edge case, adhoc URL). Escribe exactamente: `H-1B unknown — verify manually`.
+   - Si `{{LCA_COUNT}}` es un entero `≥ 50` → escribe: `H-1B confirmed ({{LCA_COUNT}} LCAs)`
+   - Si `{{LCA_COUNT}}` es un entero `10–49` → escribe: `H-1B likely ({{LCA_COUNT}} LCAs)`
+   - Si `{{LCA_COUNT}}` es un entero `1–9` → escribe: `H-1B low ({{LCA_COUNT}} LCAs)`
+   - Si `{{LCA_COUNT}}` es `0` → escribe: `No H-1B (0 LCAs)`
+
+   **Override del JD (raro)**: si el JD dice explícitamente "we will sponsor H-1B" pero LCA_COUNT es bajo, USA la etiqueta basada en LCA_COUNT (fuente objetiva) y añade la nota del JD en la parte freeform DESPUÉS del tag, por ejemplo: `H-1B low (3 LCAs) — JD explicitly promises sponsorship`. Nunca reemplaces el tag con una palabra vaga como "friendly", "unconfirmed", "unreachable" o "unclear".
 
 2. **Comp tag** (una de las siguientes):
    - `$XK–$YK` — rango salarial (ej. `$160K–$190K`)

@@ -563,9 +563,10 @@ function gate1PendingJobs() {
 async function runGate1() {
   const jobs = gate1PendingJobs();
   if (jobs.length === 0) { log('gate1: no new jobs to screen'); return 0; }
-  log(`gate1: screening ${jobs.length} jobs (H1B + keywords) …`);
+  const needsSponsorship = userNeedsSponsorship();
+  log(`gate1: screening ${jobs.length} jobs (${needsSponsorship ? 'H1B + keywords' : 'keywords only — no sponsorship needed'}) …`);
 
-  const cache = readH1bCache();
+  const cache = needsSponsorship ? readH1bCache() : new Map();
   const results = [];
   const CONCURRENCY = 5;
 
@@ -599,56 +600,58 @@ async function runGate1() {
         if (capExempt) return { ...job, company, status: 'FILTER', lca: 0, reason: `cap-exempt: ${capExempt}` };
       }
 
-      // Step C: LCA check — aliases → normalization → suffix expansion
-      const slug = toSlug(company);
+      // Step C: LCA check — skipped entirely for users who don't need sponsorship.
+      // No h1bdata.info fetch, no cache read/write. lcaCount left as null.
+      let lcaCount = null;
+      if (needsSponsorship) {
+        const slug = toSlug(company);
 
-      // Resolve canonical name via aliases table
-      const aliasName = COMPANY_ALIASES[company.toLowerCase()] || COMPANY_ALIASES[company];
-      const lookupName = aliasName || company;
-      const lookupSlug = toSlug(lookupName);
+        // Resolve canonical name via aliases table
+        const aliasName = COMPANY_ALIASES[company.toLowerCase()] || COMPANY_ALIASES[company];
+        const lookupName = aliasName || company;
+        const lookupSlug = toSlug(lookupName);
 
-      // Check cache for canonical slug first, then original slug
-      const cached = cache.get(lookupSlug) || (aliasName ? null : cache.get(slug));
-      let lcaCount;
-      let searchedAs = lookupName;
+        // Check cache for canonical slug first, then original slug
+        const cached = cache.get(lookupSlug) || (aliasName ? null : cache.get(slug));
+        let searchedAs = lookupName;
 
-      if (cached && isFresh(cached.last_checked)) {
-        lcaCount = cached.total_lca;
-      } else {
-        // Try normalized name (strips ", Inc." / "(AWS)" etc.)
-        const normalizedName = safeNormalize(lookupName);
-        lcaCount = await fetchLcaCount(normalizedName);
-        searchedAs = normalizedName;
+        if (cached && isFresh(cached.last_checked)) {
+          lcaCount = cached.total_lca;
+        } else {
+          // Try normalized name (strips ", Inc." / "(AWS)" etc.)
+          const normalizedName = safeNormalize(lookupName);
+          lcaCount = await fetchLcaCount(normalizedName);
+          searchedAs = normalizedName;
 
-        // If normalized returned 0 and it changed the name, also try the original
-        if (lcaCount === 0 && normalizedName !== lookupName) {
-          const rawCount = await fetchLcaCount(lookupName);
-          if (rawCount > 0) { lcaCount = rawCount; searchedAs = lookupName; }
-        }
-
-        // Still 0 and no alias found — try suffix variants (self-learning)
-        if (lcaCount === 0 && !aliasName) {
-          const expanded = await trySuffixExpansion(normalizedName);
-          if (expanded.count > 0) {
-            lcaCount = expanded.count;
-            searchedAs = expanded.foundAs;
-            // Auto-learn: persist alias for future Gate 1 runs this session
-            COMPANY_ALIASES[company.toLowerCase()] = expanded.foundAs;
+          // If normalized returned 0 and it changed the name, also try the original
+          if (lcaCount === 0 && normalizedName !== lookupName) {
+            const rawCount = await fetchLcaCount(lookupName);
+            if (rawCount > 0) { lcaCount = rawCount; searchedAs = lookupName; }
           }
-        }
 
-        // Write to cache using the slug of the name that actually returned results
-        const cacheSlug = toSlug(searchedAs !== lookupName ? searchedAs : lookupSlug);
-        updateH1bCache(cacheSlug, searchedAs, lcaCount);
-        cache.set(cacheSlug, { total_lca: lcaCount, last_checked: new Date().toISOString().slice(0, 10) });
+          // Still 0 and no alias found — try suffix variants (self-learning)
+          if (lcaCount === 0 && !aliasName) {
+            const expanded = await trySuffixExpansion(normalizedName);
+            if (expanded.count > 0) {
+              lcaCount = expanded.count;
+              searchedAs = expanded.foundAs;
+              // Auto-learn: persist alias for future Gate 1 runs this session
+              COMPANY_ALIASES[company.toLowerCase()] = expanded.foundAs;
+            }
+          }
+
+          // Write to cache using the slug of the name that actually returned results
+          const cacheSlug = toSlug(searchedAs !== lookupName ? searchedAs : lookupSlug);
+          updateH1bCache(cacheSlug, searchedAs, lcaCount);
+          cache.set(cacheSlug, { total_lca: lcaCount, last_checked: new Date().toISOString().slice(0, 10) });
+        }
       }
 
       // Step D: LCA threshold check — only applies if user needs sponsorship.
       // For LinkedIn without JD: lower threshold to 1 — any LCA history passes.
       // The batch worker will do full keyword + sponsor screening with the real JD.
-      // For users who don't need sponsorship (US Citizen / Green Card / Permanent Resident),
-      // LCA count is informational only — all companies with legitimate JDs proceed.
-      if (userNeedsSponsorship()) {
+      // Citizens skip this entirely (needsSponsorship=false → lcaCount=null → no filter).
+      if (needsSponsorship) {
         const hasExplicitSponsor = jdText && /will sponsor.*h.?1.?b|h.?1.?b.*sponsor|visa sponsorship (provided|available|offered)/i.test(jdText);
         const minLca = isLinkedInNoJd ? 1 : 10;
         if (lcaCount < minLca && !hasExplicitSponsor) {
@@ -670,7 +673,7 @@ async function runGate1() {
     });
   }
   const newRows = results.filter(r => !existingIds.has(r.id))
-    .map(r => `${r.id}\t${r.status}\t${r.lca}\t${r.reason}\t${r.company}`).join('\n');
+    .map(r => `${r.id}\t${r.status}\t${r.lca ?? ''}\t${r.reason}\t${r.company}`).join('\n');
 
   if (!existsSync(GATE1_RESULTS)) writeFileSync(GATE1_RESULTS, 'id\tstatus\tlca_count\treason\tcompany\n');
   if (newRows) appendFileSync(GATE1_RESULTS, newRows + '\n');
