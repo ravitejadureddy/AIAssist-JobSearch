@@ -49,28 +49,54 @@ function safeNormalize(name) {
   return n;
 }
 
+// Same suffix list Gate 1 uses in trySuffixExpansion().
+const SUFFIX_VARIANTS = ['', ' Inc', ' Inc.', ' LLC', ' Ltd', ' Corp', ' Corporation',
+  ' Technologies', ' Technology', ' Solutions', ' Systems', ' Group',
+  ' Software', ' Services', ' Consulting'];
+
 // Look up a company in the LCA cache, trying variants that Gate 1 might
-// have used as the cache key.
+// have used as the cache key. Order mirrors Gate 1:
+//   1. Raw company slug
+//   2. safeNormalize()'d slug (strips ", Inc." / "(AWS)" etc.)
+//   3. Suffix expansion — safeNormalize()'d name + each SUFFIX_VARIANT
 function lookupLca(cache, company) {
-  const candidates = [
-    company,
-    safeNormalize(company),
-  ];
-  for (const c of candidates) {
+  const raw = String(company).trim();
+  const norm = safeNormalize(raw);
+  const primary = [raw, norm];
+  for (const c of primary) {
     const slug = toSlug(c);
     if (cache.has(slug)) return { lca: cache.get(slug), matched: c };
+  }
+  for (const suffix of SUFFIX_VARIANTS) {
+    const candidate = (norm + suffix).trim();
+    const slug = toSlug(candidate);
+    if (cache.has(slug)) return { lca: cache.get(slug), matched: candidate };
   }
   return null;
 }
 
-// Mirror of parseH1B (dashboard-server.mjs:391) + parseH1BLabel (queue-eligibility.mjs:44).
-// Returns a non-null value → row is already tagged, skip it.
+// Exact mirror of parseH1B (dashboard-server.mjs:391) — returns the label
+// the dashboard would show for this Notes string, or null.
 function parseH1B(notes) {
   if (!notes) return null;
   const lower = notes.toLowerCase();
-  if (notes.match(/(\d+)\+?\s*(?:cumulative\s+)?(?:h1b\s+)?lca/i)) return 'lca-count';
+  const lcaMatch = notes.match(/(\d+)\+?\s*(?:cumulative\s+)?(?:h1b\s+)?lca/i);
+  if (lcaMatch) {
+    const c = parseInt(lcaMatch[1]);
+    if (c >= 50) return 'High';
+    if (c >= 10) return 'Medium';
+    if (c >= 1)  return 'Low';
+    return 'No';
+  }
   if (lower.includes('unreachable')) return 'Unreachable';
-  if (lower.match(/h[-\s]?1[-\s]?b\s+(confirmed|unverified|likely|unlikely|friendly|low|no|hard)\b/)) return 'compact';
+  const compactM = lower.match(/h[-\s]?1[-\s]?b\s+(confirmed|unverified|likely|unlikely|friendly|low|no|hard)\b/);
+  if (compactM) {
+    const lbl = compactM[1];
+    if (lbl === 'confirmed') return 'High';
+    if (lbl === 'likely' || lbl === 'friendly') return 'Medium';
+    if (lbl === 'unverified') return 'Unverified';
+    return 'No';
+  }
   if (lower.includes('strong h-1b') || lower.includes('confirmed h-1b') ||
       lower.includes('h-1b confirmed') || lower.includes('h1b confirmed') ||
       lower.includes('fortune 500 sponsor') || lower.includes('sponsor-capable')) return 'High';
@@ -88,6 +114,12 @@ function parseH1B(notes) {
   if (lower.includes('sponsorship: not required') || lower.includes('sponsorship not required')) return 'N/A';
   return null;
 }
+
+// Labels that are worth replacing when cache has a definitive LCA count.
+// parseH1B evaluates the LCA-count regex FIRST, so appending
+// `H-1B confirmed (N LCAs)` to a row will make the dashboard render the
+// count-based label instead of the legacy Unverified/Unreachable string.
+const OVERRIDABLE = new Set(['Unverified', 'Unreachable']);
 
 function loadH1bCache() {
   const cache = new Map();
@@ -127,6 +159,7 @@ function main() {
 
   let alreadyTagged = 0;
   let backfilled    = 0;
+  let overrode      = 0;
   let noCacheHit    = 0;
   let skippedMalformed = 0;
   const missingCompanies = [];
@@ -152,7 +185,10 @@ function main() {
     // If Notes contains `|`, parts.length > 11 — reconstruct by joining tail.
     const notes = parts.slice(9, parts.length - 1).join('|').trim();
 
-    if (parseH1B(notes)) { alreadyTagged++; return line; }
+    const currentLabel = parseH1B(notes);
+    // Skip only if the row already has a clean High/Medium/Low/No/N/A label.
+    // Unverified/Unreachable rows are candidates for override via cache.
+    if (currentLabel && !OVERRIDABLE.has(currentLabel)) { alreadyTagged++; return line; }
 
     let newTag;
     if (needsSponsorship) {
@@ -162,7 +198,9 @@ function main() {
         if (missingCompanies.length < 20) missingCompanies.push(company);
         return line; // can't backfill without cache
       }
-      newTag = `${tagFromCount(hit.lca)} (backfilled)`;
+      const suffix = currentLabel ? ` (override of ${currentLabel})` : ' (backfilled)';
+      newTag = `${tagFromCount(hit.lca)}${suffix}`;
+      if (currentLabel) overrode++;
     } else {
       newTag = 'Sponsorship: not required (backfilled)';
     }
@@ -181,8 +219,10 @@ function main() {
   });
 
   console.log('');
+  const netBackfilled = backfilled - overrode;
   console.log(`Already tagged (skipped):  ${alreadyTagged}`);
-  console.log(`Backfilled with new tag:   ${backfilled}`);
+  console.log(`Newly tagged (was null):   ${netBackfilled}`);
+  console.log(`Overrode Unverified/…:     ${overrode}`);
   console.log(`No cache hit (left alone): ${noCacheHit}`);
   console.log(`Malformed rows (skipped):  ${skippedMalformed}`);
 
