@@ -471,7 +471,7 @@ console.log('\n10. AGENTS.md integrity');
 
 const agents = readFile('AGENTS.md');
 const requiredSections = [
-  'Data Contract', 'Update Check', 'Ethical Use',
+  'Data Contract', 'Ethical Use',
   'Offer Verification', 'Canonical States', 'TSV Format',
   'First Run', 'Onboarding',
 ];

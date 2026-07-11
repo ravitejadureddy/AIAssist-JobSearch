@@ -97,7 +97,7 @@ For each `visa_status`, temporarily override in a `/tmp/audit-profile.yml` copy,
 
 - `launchctl list | grep careerops` — both `com.careerops.batch` and `com.careerops.scan` loaded?
 - `start.sh` and `launch-chrome.sh` are executable
-- No hardcoded personal paths in any tracked source (grep for `/Users/[username]/` patterns using the current shell user)
+- No hardcoded personal paths in any tracked source (grep tracked files for the current shell user's home-directory prefix)
 
 ## Category 8 — Regression tests
 
@@ -126,7 +126,7 @@ For each `visa_status`, temporarily override in a `/tmp/audit-profile.yml` copy,
 - Search tracked files for:
   - Email addresses (regex)
   - US phone number patterns
-  - `/Users/<username>/` paths (with the actual username)
+  - Absolute home-directory paths that embed the local shell user
   - API key formats: `ghp_`, `github_pat_`, `sk-`, `sk-ant-`, `AKIA`, `xoxb-`, `xoxp-`, `zpka_`
 - Also search full git history via `git log -p -S` for the same patterns
 - Report any matches with `file:line`
